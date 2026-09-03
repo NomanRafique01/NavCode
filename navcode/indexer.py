@@ -25,19 +25,114 @@ CHUNK_LINES = 50
 
 # Map file extension → language tag
 _EXT_LANGUAGE: dict[str, str] = {
+    # Python
     ".py": "python",
+    ".pyw": "python",
+    ".pyi": "python",
+    # JavaScript
     ".js": "javascript",
-    ".ts": "javascript",
-    ".jsx": "javascript",
-    ".tsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    # TypeScript
+    ".ts": "typescript",
+    ".mts": "typescript",
+    ".cts": "typescript",
+    # JSX / TSX
+    ".jsx": "jsx",
+    ".tsx": "tsx",
+    # Java
     ".java": "java",
+    # C
+    ".c": "c",
+    # C++ (note: .h/.hpp resolved to cpp; plain .h falls to c at parser level)
     ".cpp": "cpp",
     ".cc": "cpp",
-    ".h": "cpp",
-    ".go": "go",
-    ".rs": "rust",
-    ".rb": "ruby",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
+    ".hh": "cpp",
+    ".hxx": "cpp",
+    ".h": "c",
+    # C#
     ".cs": "csharp",
+    # Go
+    ".go": "go",
+    # Rust
+    ".rs": "rust",
+    # Ruby
+    ".rb": "ruby",
+    ".rake": "ruby",
+    ".gemspec": "ruby",
+    # PHP
+    ".php": "php",
+    ".phtml": "php",
+    # Swift
+    ".swift": "swift",
+    # Kotlin
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    # Scala
+    ".scala": "scala",
+    ".sc": "scala",
+    # Haskell
+    ".hs": "haskell",
+    ".lhs": "haskell",
+    # Lua
+    ".lua": "lua",
+    # R
+    ".r": "r",
+    ".R": "r",
+    # Bash / shell
+    ".sh": "bash",
+    ".bash": "bash",
+    ".zsh": "bash",
+    ".fish": "bash",
+    # HTML
+    ".html": "html",
+    ".htm": "html",
+    ".xhtml": "html",
+    # CSS / preprocessors
+    ".css": "css",
+    ".scss": "css",
+    ".sass": "css",
+    ".less": "css",
+    # JSON
+    ".json": "json",
+    ".jsonc": "json",
+    # YAML
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    # TOML
+    ".toml": "toml",
+    # Markdown
+    ".md": "markdown",
+    ".mdx": "markdown",
+    ".markdown": "markdown",
+    # SQL
+    ".sql": "sql",
+    # Dockerfile handled separately (no extension)
+    ".dockerfile": "dockerfile",
+    # Regex
+    ".regex": "regex",
+    # XML / SVG
+    ".xml": "xml",
+    ".svg": "xml",
+    # Plain text / logs / env
+    ".txt": "text",
+    ".log": "text",
+    ".env": "text",
+    # Config / INI
+    ".ini": "config",
+    ".cfg": "config",
+    ".conf": "config",
+    ".properties": "config",
+}
+
+# Special bare filenames → language (no extension)
+_BARE_FILENAMES: dict[str, str] = {
+    "dockerfile": "dockerfile",
+    "Dockerfile": "dockerfile",
+    "makefile": "bash",
+    "Makefile": "bash",
 }
 
 # ---------------------------------------------------------------------------
@@ -73,7 +168,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbols USING fts5(
 
 
 def detect_language(path: Path) -> str:
-    """Return a language tag for *path* based on its file extension.
+    """Return a language tag for *path* based on its extension or bare filename.
+
+    Checks the bare filename first (e.g. ``Dockerfile``), then falls back to
+    the file extension.  Extension lookup is case-insensitive.
 
     Args:
         path: Source file path.
@@ -81,6 +179,9 @@ def detect_language(path: Path) -> str:
     Returns:
         A lowercase language string (e.g. ``"python"``) or ``"unknown"``.
     """
+    # Bare filename check first (Dockerfile, Makefile, …)
+    if path.name in _BARE_FILENAMES:
+        return _BARE_FILENAMES[path.name]
     return _EXT_LANGUAGE.get(path.suffix.lower(), "unknown")
 
 
