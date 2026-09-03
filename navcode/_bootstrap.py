@@ -1,8 +1,4 @@
-# navcode/_bootstrap.py
-# Nythris Studio — navcode
-# Author: Noman Rafique
-
-"""Bootstrap utilities — ensures the ONNX embedding model is present on disk."""
+﻿"""Bootstrap utilities — ensures the ONNX embedding model is present on disk."""
 
 from pathlib import Path
 

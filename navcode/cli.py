@@ -1,8 +1,4 @@
-# navcode/cli.py
-# Nythris Studio — navcode
-# Author: Noman Rafique
-
-"""Typer CLI entry point for navcode."""
+﻿"""Typer CLI entry point for navcode."""
 
 from typing import Optional
 
