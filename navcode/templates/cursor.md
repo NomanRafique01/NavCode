@@ -1,0 +1,1 @@
+# Cursor — navcode context template
