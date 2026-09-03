@@ -223,6 +223,20 @@ class TaskClassifier:
         # Rule 4 — highest (max enum value) wins
         return max(matched_levels, key=lambda l: l.value)
 
+    def classify_with_config(self, task: str) -> tuple[ScopeLevel, dict[str, Any]]:
+        """Classify *task* and return both the scope and its retrieval config.
+
+        Convenience wrapper used by :class:`~navcode.retriever.ContextRetriever`.
+
+        Args:
+            task: Free-text task description.
+
+        Returns:
+            ``(scope, config)`` tuple.
+        """
+        scope = self.classify(task)
+        return scope, self.get_retrieval_config(scope)
+
     @staticmethod
     def get_retrieval_config(scope: ScopeLevel) -> dict[str, Any]:
         """Return the retrieval parameter dict for *scope*.
