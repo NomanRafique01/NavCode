@@ -5,8 +5,6 @@ from typing import Optional
 
 import typer
 from rich.console import Console
-from rich.panel import Panel
-
 from navcode import __version__
 
 app = typer.Typer(
@@ -182,34 +180,168 @@ def init(
 
 @app.command()
 def status() -> None:
-    """Show the current navcode index status for this codebase."""
-    _console.print(
-        Panel("[yellow]navcode status[/yellow] coming soon", border_style="dim")
+    """Show navcode index health and watcher status."""
+    from navcode.indexer import CodebaseIndexer
+    from navcode.watcher import CodebaseWatcher
+    from rich.table import Table
+
+    project_root = Path.cwd()
+    codenav_dir = project_root / ".codenav"
+
+    if not codenav_dir.exists():
+        _console.print("[red]✗ navcode not initialized.[/red]")
+        _console.print("Run: [bold]navcode init --auto[/bold]")
+        raise typer.Exit(1)
+
+    db_path = codenav_dir / "index.db"
+    indexer = CodebaseIndexer(db_path)
+    s = indexer.get_stats()
+
+    watcher = CodebaseWatcher(project_root, indexer)
+    running = watcher.is_running()
+
+    table = Table(title="navcode status")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value", style="green")
+
+    table.add_row("Initialized", "✓ yes")
+    table.add_row("Watcher", "✓ running" if running else "✗ stopped")
+    table.add_row("Indexed files", str(s.get("file_count", 0)))
+    table.add_row("Total symbols", str(s.get("symbol_count", 0)))
+    table.add_row("DB size", f"{s.get('db_size_kb', 0)} KB")
+    table.add_row(
+        "Graph",
+        "✓ built" if (codenav_dir / "graph.json").exists() else "✗ not built",
     )
+    table.add_row(
+        "Embeddings model",
+        "✓ ready"
+        if (Path.home() / ".navcode" / "models" / "model_quantized.onnx").exists()
+        else "✗ missing",
+    )
+
+    _console.print(table)
 
 
 @app.command()
 def reindex() -> None:
-    """Force a full re-index of the current codebase."""
-    _console.print(
-        Panel("[yellow]navcode reindex[/yellow] coming soon", border_style="dim")
-    )
+    """Force full reindex of the codebase."""
+    from navcode.indexer import CodebaseIndexer
+    from navcode.embeddings import EmbeddingsEngine
+    from navcode.graph import CallGraph
+    from rich.progress import Progress
+
+    project_root = Path.cwd()
+    codenav_dir = project_root / ".codenav"
+
+    if not codenav_dir.exists():
+        _console.print("[red]✗ navcode not initialized.[/red]")
+        raise typer.Exit(1)
+
+    _console.print("[bold]Reindexing codebase...[/bold]\n")
+
+    db_path = codenav_dir / "index.db"
+    indexer = CodebaseIndexer(db_path)
+
+    try:
+        engine = EmbeddingsEngine()
+    except Exception:
+        engine = None
+        _console.print("[yellow]⚠ Embeddings unavailable — FTS5 only[/yellow]")
+
+    files = [f for f in project_root.rglob("*") if f.is_file()]
+
+    indexed = 0
+    failed = 0
+
+    with Progress() as progress:
+        task = progress.add_task("Indexing...", total=len(files))
+        for f in files:
+            try:
+                indexer.index_file(f, engine)
+                indexed += 1
+            except Exception:
+                failed += 1
+            progress.advance(task)
+
+    # Rebuild graph
+    _console.print("Rebuilding call graph...")
+    graph = CallGraph(codenav_dir / "index.db")
+    graph.save(codenav_dir / "graph.json")
+
+    _console.print(f"\n[green]✓[/green] Indexed: {indexed} files")
+    if failed:
+        _console.print(f"[yellow]⚠ Skipped: {failed} files[/yellow]")
+    _console.print("[green]✓[/green] Graph rebuilt")
+    _console.print("[bold green]Reindex complete.[/bold green]")
 
 
 @app.command()
-def logs() -> None:
-    """Tail the navcode log stream."""
-    _console.print(
-        Panel("[yellow]navcode logs[/yellow] coming soon", border_style="dim")
-    )
+def logs(
+    tail: int = typer.Option(50, "--tail", "-n", help="Number of lines to show"),
+) -> None:
+    """Show navcode activity logs."""
+    project_root = Path.cwd()
+    log_path = project_root / ".codenav" / "navcode.log"
+
+    if not log_path.exists():
+        _console.print("[yellow]No logs found yet.[/yellow]")
+        raise typer.Exit()
+
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    recent = lines[-tail:]
+
+    for line in recent:
+        if "ERROR" in line:
+            _console.print(f"[red]{line}[/red]")
+        elif "WARNING" in line:
+            _console.print(f"[yellow]{line}[/yellow]")
+        elif "SUCCESS" in line or "✓" in line:
+            _console.print(f"[green]{line}[/green]")
+        else:
+            _console.print(line)
 
 
 @app.command()
 def stats() -> None:
-    """Display token-reduction statistics for the current session."""
-    _console.print(
-        Panel("[yellow]navcode stats[/yellow] coming soon", border_style="dim")
-    )
+    """Show token savings and usage statistics."""
+    from navcode.indexer import CodebaseIndexer
+    from rich.table import Table
+
+    project_root = Path.cwd()
+    codenav_dir = project_root / ".codenav"
+
+    if not codenav_dir.exists():
+        _console.print("[red]✗ navcode not initialized.[/red]")
+        raise typer.Exit(1)
+
+    db_path = codenav_dir / "index.db"
+    indexer = CodebaseIndexer(db_path)
+    s = indexer.get_stats()
+
+    # Token savings estimate
+    file_count = s.get("file_count", 0)
+    symbol_count = s.get("symbol_count", 0)
+    avg_file_tokens = 2000
+    total_raw = file_count * avg_file_tokens
+    avg_context_tokens = 4000
+    saved = max(0, total_raw - avg_context_tokens)
+    reduction = round((saved / total_raw * 100) if total_raw else 0, 1)
+
+    table = Table(title="navcode stats")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+
+    table.add_row("Indexed files", str(file_count))
+    table.add_row("Total symbols", str(symbol_count))
+    table.add_row("DB size", f"{s.get('db_size_kb', 0)} KB")
+    table.add_row("Est. raw tokens", f"~{total_raw:,}")
+    table.add_row("Est. context tokens", f"~{avg_context_tokens:,}")
+    table.add_row("Est. tokens saved", f"~{saved:,}")
+    table.add_row("Est. reduction", f"{reduction}%")
+
+    _console.print(table)
+    _console.print("\n[dim]Estimates based on avg 2000 tokens/file[/dim]")
 
 
 @app.command()
