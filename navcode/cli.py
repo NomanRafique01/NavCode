@@ -1,5 +1,6 @@
-﻿"""Typer CLI entry point for navcode."""
+"""Typer CLI entry point for navcode."""
 
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -148,6 +149,17 @@ def stats() -> None:
     _console.print(
         Panel("[yellow]navcode stats[/yellow] coming soon", border_style="dim")
     )
+
+
+@app.command()
+def mcp_serve(
+    root: Path = typer.Option(Path.cwd(), help="Project root"),
+) -> None:
+    """Start navcode MCP server for agent connections."""
+    from navcode.mcp_server import serve
+
+    _console.print("[green]Starting navcode MCP server...[/green]")
+    serve(project_root=root)
 
 
 if __name__ == "__main__":
