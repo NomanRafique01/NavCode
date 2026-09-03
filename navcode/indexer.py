@@ -1,8 +1,9 @@
 """SQLite FTS5-backed codebase indexer for navcode.
 
-Maintains two tables:
-- ``files``   — one row per indexed source file (metadata).
-- ``symbols`` — FTS5 virtual table of code chunks extracted from each file.
+Maintains three tables:
+- ``files``      — one row per indexed source file (metadata).
+- ``symbols``    — FTS5 virtual table of code chunks extracted from each file.
+- ``embeddings`` — BLOB storage of float32 embedding vectors per symbol row.
 
 The indexer performs basic 50-line chunking.  Proper AST-level symbol
 extraction will be handled by ``parser.py`` in a later feature branch.
@@ -12,9 +13,13 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import numpy as np
 from loguru import logger
+
+if TYPE_CHECKING:
+    from navcode.embeddings import EmbeddingsEngine
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -161,6 +166,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbols USING fts5(
 );
 """
 
+_DDL_EMBEDDINGS = """
+CREATE TABLE IF NOT EXISTS embeddings (
+    id           INTEGER PRIMARY KEY,
+    symbol_rowid INTEGER UNIQUE,
+    embedding    BLOB NOT NULL
+);
+"""
+
 
 # ---------------------------------------------------------------------------
 # Language detection
@@ -245,14 +258,18 @@ class CodebaseIndexer:
     # Public API
     # ------------------------------------------------------------------
 
-    def index_file(self, path: Path) -> None:
+    def index_file(self, path: Path, engine: EmbeddingsEngine | None = None) -> None:
         """Parse and index *path*, replacing any existing entry.
 
         Reads the file, detects its language, chunks it into 50-line
-        blocks, and upserts the metadata + symbol rows.
+        blocks, and upserts the metadata + symbol rows.  If *engine* is
+        provided, vector embeddings are stored alongside each symbol.
 
         Args:
             path: Absolute or relative path to the file to index.
+            engine: Optional :class:`~navcode.embeddings.EmbeddingsEngine`
+                instance.  When supplied, embeddings are computed and stored
+                for every symbol.  Failures are logged and never propagate.
         """
         path = path.resolve()
         rel = self._rel(path)
@@ -292,7 +309,16 @@ class CodebaseIndexer:
                 },
             )
 
-            # Remove stale symbols then re-insert
+            # Remove stale symbols (and their embeddings) then re-insert
+            self._conn.execute(
+                """
+                DELETE FROM embeddings
+                WHERE symbol_rowid IN (
+                    SELECT rowid FROM symbols WHERE path = ?
+                )
+                """,
+                (rel,),
+            )
             self._conn.execute("DELETE FROM symbols WHERE path = ?", (rel,))
             self._conn.executemany(
                 """
@@ -305,6 +331,29 @@ class CodebaseIndexer:
                 ],
             )
 
+        # Embed symbols if an engine was supplied
+        if engine is not None:
+            symbols_rows = self.get_file_symbols(path)
+            for row in symbols_rows:
+                symbol_name = row["symbol_name"]
+                symbol_type = row["symbol_type"]
+                content = row["content"]
+                # Fetch the rowid for this symbol
+                cur = self._conn.execute(
+                    "SELECT rowid FROM symbols WHERE path = ? AND symbol_name = ? LIMIT 1",
+                    (rel, symbol_name),
+                )
+                result = cur.fetchone()
+                if result is None:
+                    continue
+                symbol_rowid = result[0]
+                embed_text = f"{symbol_name} {symbol_type} {content}"
+                try:
+                    embedding = engine.embed(embed_text)
+                    self.store_embedding(symbol_rowid, embedding)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Embedding failed for {} ({}): {}", rel, symbol_name, exc)
+
         logger.debug("Indexed {} ({} chunks, lang={})", rel, len(chunks), language)
 
     def remove_file(self, path: Path) -> None:
@@ -315,6 +364,15 @@ class CodebaseIndexer:
         """
         rel = self._rel(path.resolve())
         with self._conn:
+            self._conn.execute(
+                """
+                DELETE FROM embeddings
+                WHERE symbol_rowid IN (
+                    SELECT rowid FROM symbols WHERE path = ?
+                )
+                """,
+                (rel,),
+            )
             self._conn.execute("DELETE FROM symbols WHERE path = ?", (rel,))
             self._conn.execute("DELETE FROM files WHERE path = ?", (rel,))
         logger.debug("Removed {} from index", rel)
@@ -379,6 +437,170 @@ class CodebaseIndexer:
         ).fetchone()
         return row is not None
 
+    def store_embedding(self, symbol_rowid: int, embedding: np.ndarray) -> None:
+        """Persist *embedding* for a symbol identified by its rowid.
+
+        Args:
+            symbol_rowid: ``rowid`` of the corresponding symbols row.
+            embedding: Float32 array of shape ``(384,)``.
+        """
+        blob = embedding.astype(np.float32).tobytes()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO embeddings (symbol_rowid, embedding)
+                VALUES (?, ?)
+                ON CONFLICT(symbol_rowid) DO UPDATE SET embedding = excluded.embedding
+                """,
+                (symbol_rowid, blob),
+            )
+
+    def get_all_embeddings(self) -> tuple[np.ndarray, list[int]]:
+        """Load all stored embeddings into memory.
+
+        Returns:
+            A tuple ``(matrix, rowids)`` where *matrix* has shape
+            ``(N, 384)`` float32 and *rowids* is the corresponding list of
+            symbol rowids.  Returns an empty matrix and list when no
+            embeddings exist.
+        """
+        cur = self._conn.execute("SELECT symbol_rowid, embedding FROM embeddings")
+        rows = cur.fetchall()
+        if not rows:
+            return np.empty((0, 384), dtype=np.float32), []
+        rowids = [int(r[0]) for r in rows]
+        matrix = np.vstack(
+            [np.frombuffer(r[1], dtype=np.float32) for r in rows]
+        ).astype(np.float32)
+        return matrix, rowids
+
+    def semantic_search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Semantic similarity search over all stored embeddings.
+
+        Embeds *query* with :class:`~navcode.embeddings.EmbeddingsEngine`,
+        scores it against every stored vector, and returns the top results.
+
+        Falls back gracefully when embeddings are unavailable.
+
+        Args:
+            query: Natural-language or code query string.
+            limit: Maximum number of results.
+
+        Returns:
+            List of result dicts with keys ``path``, ``symbol_name``,
+            ``symbol_type``, ``line_start``, ``line_end``, ``content``,
+            ``language``, ``score``.
+        """
+        from navcode.embeddings import EmbeddingsEngine  # lazy import
+
+        try:
+            engine = EmbeddingsEngine()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("EmbeddingsEngine unavailable for semantic_search: {}", exc)
+            return []
+
+        matrix, rowids = self.get_all_embeddings()
+        if len(rowids) == 0:
+            return []
+
+        query_vec = engine.embed(query)
+        top = EmbeddingsEngine.top_k(query_vec, matrix, k=limit)
+
+        results: list[dict[str, Any]] = []
+        for idx, score in top:
+            rowid = rowids[idx]
+            row = self._conn.execute(
+                """
+                SELECT s.path, s.symbol_name, s.symbol_type,
+                       s.line_start, s.line_end, s.content,
+                       f.language
+                FROM symbols AS s
+                JOIN files   AS f ON f.path = s.path
+                WHERE s.rowid = ?
+                """,
+                (rowid,),
+            ).fetchone()
+            if row is None:
+                continue
+            results.append(
+                {
+                    "path": row[0],
+                    "symbol_name": row[1],
+                    "symbol_type": row[2],
+                    "line_start": row[3],
+                    "line_end": row[4],
+                    "content": row[5],
+                    "language": row[6],
+                    "score": score,
+                }
+            )
+        return results
+
+    def hybrid_search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Combined semantic + FTS5 search.
+
+        Runs both searches, normalises their scores, then merges by
+        deduplicating on ``(path, line_start)``.  Semantic results are
+        weighted 0.7 and FTS5 results are weighted 0.3.
+
+        Args:
+            query: Search query.
+            limit: Maximum number of results to return.
+
+        Returns:
+            List of result dicts (same shape as :meth:`search`) sorted by
+            combined score descending.
+        """
+        # Semantic results (may be empty if model unavailable)
+        sem_results = self.semantic_search(query, limit=limit * 2)
+
+        # FTS5 results — guard against invalid FTS5 query syntax
+        try:
+            fts_results_raw = self.search(query, limit=limit * 2)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("FTS5 search failed in hybrid_search: {}", exc)
+            fts_results_raw = []
+
+        # Normalise FTS5 rank: rank is negative (lower = better), convert to 0-1
+        if fts_results_raw:
+            ranks = [abs(r["rank"]) for r in fts_results_raw]
+            max_rank = max(ranks) or 1.0
+            for r in fts_results_raw:
+                r["fts_score"] = 1.0 - abs(r["rank"]) / max_rank
+        else:
+            for r in fts_results_raw:
+                r["fts_score"] = 0.0
+
+        # Build merged dict keyed by (path, line_start)
+        merged: dict[tuple[str, int], dict[str, Any]] = {}
+
+        for r in sem_results:
+            key = (r["path"], r["line_start"])
+            merged[key] = {**r, "combined_score": r["score"] * 0.7}
+
+        for r in fts_results_raw:
+            key = (r["path"], r["line_start"])
+            fts_contrib = r["fts_score"] * 0.3
+            if key in merged:
+                merged[key]["combined_score"] += fts_contrib
+            else:
+                merged[key] = {
+                    "path": r["path"],
+                    "symbol_name": r["symbol_name"],
+                    "symbol_type": r["symbol_type"],
+                    "line_start": r["line_start"],
+                    "line_end": r["line_end"],
+                    "content": r["content"],
+                    "language": r.get("language", "unknown"),
+                    "score": fts_contrib,
+                    "combined_score": fts_contrib,
+                }
+
+        sorted_results = sorted(
+            merged.values(), key=lambda x: x["combined_score"], reverse=True
+        )
+        return sorted_results[:limit]
+
     def get_stats(self) -> dict[str, Any]:
         """Return a summary dict with ``file_count`` and ``symbol_count``.
 
@@ -411,6 +633,7 @@ class CodebaseIndexer:
         with self._conn:
             self._conn.execute(_DDL_FILES)
             self._conn.execute(_DDL_SYMBOLS)
+            self._conn.execute(_DDL_EMBEDDINGS)
 
     def _rel(self, abs_path: Path) -> str:
         """Return *abs_path* relative to project root as a POSIX string.
