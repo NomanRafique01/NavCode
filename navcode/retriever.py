@@ -100,15 +100,15 @@ class ContextRetriever:
 
     Args:
         project_root: Root directory of the project being indexed.  The
-            database is expected at ``<root>/.codenav/index.db``.
+            database is expected at ``<root>/.navcode/index.db``.
     """
 
     def __init__(self, project_root: Path) -> None:
         t0 = time.perf_counter()
 
         self._root = project_root.resolve()
-        db_path = self._root / ".codenav" / "index.db"
-        graph_path = self._root / ".codenav" / "graph.json"
+        db_path = self._root / ".navcode" / "index.db"
+        graph_path = self._root / ".navcode" / "graph.json"
 
         self.indexer = CodebaseIndexer(db_path)
         self.classifier = TaskClassifier()

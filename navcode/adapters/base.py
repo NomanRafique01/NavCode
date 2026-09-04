@@ -16,7 +16,7 @@ class BaseAdapter(ABC):
 
     def __init__(self, project_root: Path):
         self.project_root = project_root
-        self.codenav_dir = project_root / ".codenav"
+        self.codenav_dir = project_root / ".navcode"
 
     @abstractmethod
     def install(self) -> None:

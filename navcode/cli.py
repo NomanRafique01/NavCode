@@ -3,7 +3,7 @@
 import sys
 import io
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from loguru import logger
@@ -13,8 +13,10 @@ from rich.progress import (
     MofNCompleteColumn,
     Progress,
     SpinnerColumn,
+    TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
+    TimeRemainingColumn,
 )
 from navcode import __version__
 
@@ -57,8 +59,8 @@ def _version_callback(value: bool) -> None:
 
 
 def _setup_logging() -> None:
-    """Activate file logging into .codenav/navcode.log if the dir exists."""
-    log_dir = Path.cwd() / ".codenav"
+    """Activate file logging into .navcode/navcode.log if the dir exists."""
+    log_dir = Path.cwd() / ".navcode"
     if log_dir.exists():
         logger.add(
             log_dir / "navcode.log",
@@ -92,36 +94,96 @@ def app_startup(
         )
         ensure_model()
 
-    # Step 2 — heal .codenav/ if deleted
+    # Step 2 — heal .navcode/ if deleted
     # Skip for commands that manage the dirs themselves
     if ctx.invoked_subcommand in ("init", "install", "uninstall"):
         return
 
     project_root = Path.cwd()
-    codenav_dir = project_root / ".codenav"
+    codenav_dir = project_root / ".navcode"
     if not codenav_dir.exists():
         _console.print(
-            "[yellow]⚠ .codenav/ missing — running auto-reindex...[/yellow]"
+            "[yellow]⚠ .navcode/ missing — running auto-reindex...[/yellow]"
         )
         _auto_heal(project_root)
 
 
+def _collect_files(root: Path) -> list[Path]:
+    """Return all indexable files under *root*, skipping ignored dirs and binary files."""
+    from navcode.indexer import _SKIP_DIRS, _BINARY_SUFFIXES  # type: ignore[attr-defined]
+
+    result: list[Path] = []
+    for f in root.rglob("*"):
+        if not f.is_file():
+            continue
+        # Skip files inside ignored directories
+        try:
+            rel_parts = f.relative_to(root).parts
+        except ValueError:
+            continue
+        if any(part in _SKIP_DIRS or part.endswith(".egg-info") for part in rel_parts):
+            continue
+        if f.suffix.lower() in _BINARY_SUFFIXES:
+            continue
+        result.append(f)
+    return result
+
+
+def _make_progress() -> Progress:
+    """Return a polished Rich Progress instance for indexing operations."""
+    return Progress(
+        SpinnerColumn(spinner_name="dots", style="bold cyan"),
+        TextColumn("[bold cyan]Indexing[/bold cyan]"),
+        BarColumn(bar_width=None, complete_style="cyan", finished_style="green"),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TextColumn("[dim]•[/dim]"),
+        TimeElapsedColumn(),
+        TextColumn("[dim]eta[/dim]"),
+        TimeRemainingColumn(),
+        TextColumn("[dim]{task.fields[current_file]}[/dim]"),
+        console=_console,
+        transient=True,
+        expand=True,
+    )
+
+
+def _run_index(
+    indexer: "Any",
+    files: list[Path],
+    engine: "Any | None",
+    label: str = "Indexing",
+) -> tuple[int, int]:
+    """Run parallel indexing with a live progress bar.  Returns (indexed, failed)."""
+    total = len(files)
+
+    with _make_progress() as progress:
+        task = progress.add_task(label, total=total, current_file="")
+
+        def _tick() -> None:
+            progress.advance(task)
+
+        indexed, failed = indexer.index_files_parallel(files, engine=engine, callback=_tick)
+
+    return indexed, failed
+
+
 def _auto_heal(project_root: Path) -> None:
-    """Recreate .codenav/ and reindex from scratch."""
+    """Recreate .navcode/ and reindex from scratch."""
     from navcode.indexer import CodebaseIndexer
     from navcode.embeddings import EmbeddingsEngine
     from navcode.graph import CallGraph
     from navcode.watcher import CodebaseWatcher
 
-    codenav_dir = project_root / ".codenav"
+    codenav_dir = project_root / ".navcode"
     codenav_dir.mkdir(exist_ok=True)
 
     # Re-add to .gitignore if needed
     gitignore = project_root / ".gitignore"
     if gitignore.exists():
         content = gitignore.read_text()
-        if ".codenav/" not in content:
-            gitignore.write_text(content + "\n.codenav/\n")
+        if ".navcode/" not in content:
+            gitignore.write_text(content + "\n.navcode/\n")
 
     db_path = codenav_dir / "index.db"
     indexer = CodebaseIndexer(db_path)
@@ -131,37 +193,12 @@ def _auto_heal(project_root: Path) -> None:
     except Exception:
         engine = None
 
-    files = [f for f in project_root.rglob("*") if f.is_file()]
-    total = len(files)
-    indexed = 0
-    failed = 0
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[bold blue]Indexing[/bold blue]"),
-        BarColumn(bar_width=40),
-        MofNCompleteColumn(),
-        TextColumn("•"),
-        TimeElapsedColumn(),
-        TextColumn("[dim]{task.fields[current_file]}[/dim]"),
-        console=_console,
-        transient=True,
-    ) as progress:
-        task = progress.add_task("indexing", total=total, current_file="")
-        for f in files:
-            rel = str(f.relative_to(project_root))
-            display = rel if len(rel) <= 40 else "..." + rel[-37:]
-            progress.update(task, current_file=display)
-            try:
-                indexer.index_file(f, engine)
-                indexed += 1
-            except Exception:
-                failed += 1
-            progress.advance(task)
+    files = _collect_files(project_root)
+    indexed, failed = _run_index(indexer, files, engine)
 
     _console.print(
         f"[green]✓[/green] Indexed [bold]{indexed}[/bold] files"
-        + (f" [yellow]({failed} skipped)[/yellow]" if failed else "")
+        + (f" [yellow]({failed} failed)[/yellow]" if failed else "")
     )
 
     _console.print("[dim]Building call graph...[/dim]")
@@ -199,17 +236,17 @@ def init(
     from navcode.graph import CallGraph
 
     project_root = Path.cwd()
-    codenav_dir = project_root / ".codenav"
+    codenav_dir = project_root / ".navcode"
     codenav_dir.mkdir(exist_ok=True)
 
     # Update .gitignore
     gitignore = project_root / ".gitignore"
     if gitignore.exists():
         content = gitignore.read_text()
-        if ".codenav/" not in content:
-            gitignore.write_text(content + "\n.codenav/\n")
+        if ".navcode/" not in content:
+            gitignore.write_text(content + "\n.navcode/\n")
     else:
-        gitignore.write_text(".codenav/\n")
+        gitignore.write_text(".navcode/\n")
 
     _console.print("[bold green]navcode init[/bold green]\n")
 
@@ -220,39 +257,15 @@ def init(
         engine = EmbeddingsEngine()
     except Exception:
         engine = None
-        _console.print("[yellow]Embeddings unavailable - using FTS5 only[/yellow]")
+        _console.print("[yellow]⚠ Embeddings unavailable — FTS5 only[/yellow]")
 
-    files = [f for f in project_root.rglob("*") if f.is_file()]
-    total = len(files)
-    indexed = 0
-    failed = 0
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[bold blue]Indexing[/bold blue]"),
-        BarColumn(bar_width=40),
-        MofNCompleteColumn(),
-        TextColumn("•"),
-        TimeElapsedColumn(),
-        TextColumn("[dim]{task.fields[current_file]}[/dim]"),
-        console=_console,
-        transient=True,
-    ) as progress:
-        task = progress.add_task("indexing", total=total, current_file="")
-        for f in files:
-            rel = str(f.relative_to(project_root))
-            display = rel if len(rel) <= 40 else "..." + rel[-37:]
-            progress.update(task, current_file=display)
-            try:
-                indexer.index_file(f, engine)
-                indexed += 1
-            except Exception:
-                failed += 1
-            progress.advance(task)
+    files = _collect_files(project_root)
+    _console.print(f"[dim]Found {len(files)} files to index[/dim]")
+    indexed, failed = _run_index(indexer, files, engine)
 
     _console.print(
         f"[green]✓[/green] Indexed [bold]{indexed}[/bold] files"
-        + (f" [yellow]({failed} skipped)[/yellow]" if failed else "")
+        + (f" [yellow]({failed} failed)[/yellow]" if failed else "")
     )
 
     # Build graph
@@ -326,7 +339,7 @@ def status() -> None:
     from rich.table import Table
 
     project_root = Path.cwd()
-    codenav_dir = project_root / ".codenav"
+    codenav_dir = project_root / ".navcode"
 
     if not codenav_dir.exists():
         _console.print("[red]✗ navcode not initialized.[/red]")
@@ -371,7 +384,7 @@ def reindex() -> None:
     from navcode.graph import CallGraph
 
     project_root = Path.cwd()
-    codenav_dir = project_root / ".codenav"
+    codenav_dir = project_root / ".navcode"
 
     if not codenav_dir.exists():
         _console.print("[red]✗ navcode not initialized.[/red]")
@@ -388,37 +401,13 @@ def reindex() -> None:
         engine = None
         _console.print("[yellow]⚠ Embeddings unavailable — FTS5 only[/yellow]")
 
-    files = [f for f in project_root.rglob("*") if f.is_file()]
-    total = len(files)
-    indexed = 0
-    failed = 0
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[bold blue]Indexing[/bold blue]"),
-        BarColumn(bar_width=40),
-        MofNCompleteColumn(),
-        TextColumn("•"),
-        TimeElapsedColumn(),
-        TextColumn("[dim]{task.fields[current_file]}[/dim]"),
-        console=_console,
-        transient=True,
-    ) as progress:
-        task = progress.add_task("indexing", total=total, current_file="")
-        for f in files:
-            rel = str(f.relative_to(project_root))
-            display = rel if len(rel) <= 40 else "..." + rel[-37:]
-            progress.update(task, current_file=display)
-            try:
-                indexer.index_file(f, engine)
-                indexed += 1
-            except Exception:
-                failed += 1
-            progress.advance(task)
+    files = _collect_files(project_root)
+    _console.print(f"[dim]Found {len(files)} files to index[/dim]")
+    indexed, failed = _run_index(indexer, files, engine)
 
     _console.print(
         f"[green]✓[/green] Indexed [bold]{indexed}[/bold] files"
-        + (f" [yellow]({failed} skipped)[/yellow]" if failed else "")
+        + (f" [yellow]({failed} failed)[/yellow]" if failed else "")
     )
 
     # Rebuild graph
@@ -435,7 +424,7 @@ def logs(
 ) -> None:
     """Show navcode activity logs."""
     project_root = Path.cwd()
-    log_path = project_root / ".codenav" / "navcode.log"
+    log_path = project_root / ".navcode" / "navcode.log"
 
     if not log_path.exists():
         _console.print("[yellow]No logs found yet.[/yellow]")
@@ -462,7 +451,7 @@ def stats() -> None:
     from rich.table import Table
 
     project_root = Path.cwd()
-    codenav_dir = project_root / ".codenav"
+    codenav_dir = project_root / ".navcode"
 
     if not codenav_dir.exists():
         _console.print("[red]✗ navcode not initialized.[/red]")
@@ -530,7 +519,7 @@ def uninstall(
         False, "--keep-model", help="Keep ~/.navcode/ model cache, only remove project index."
     ),
 ) -> None:
-    """Remove navcode data: project index (.codenav/) and optionally the model cache (~/.navcode/).
+    """Remove navcode data: project index (.navcode/) and optionally the model cache (~/.navcode/).
 
     After uninstalling, running any navcode command will auto-restore everything.
     To fully remove navcode from your system run: pip uninstall navcode
@@ -538,7 +527,7 @@ def uninstall(
     import shutil
 
     project_root = Path.cwd()
-    codenav_dir = project_root / ".codenav"
+    codenav_dir = project_root / ".navcode"
     navcode_home = Path.home() / ".navcode"
 
     # --- summarise what will be deleted ---
@@ -574,11 +563,11 @@ def uninstall(
     if gitignore.exists() and codenav_dir in [p for _, p in targets]:
         text = gitignore.read_text(encoding="utf-8")
         cleaned = "\n".join(
-            line for line in text.splitlines() if line.strip() != ".codenav/"
+            line for line in text.splitlines() if line.strip() != ".navcode/"
         ).strip() + "\n"
         if cleaned != text:
             gitignore.write_text(cleaned, encoding="utf-8")
-            _console.print("[green]✓[/green] Removed .codenav/ from .gitignore")
+            _console.print("[green]✓[/green] Removed .navcode/ from .gitignore")
 
     _console.print(
         "\n[bold green]Done.[/bold green] "

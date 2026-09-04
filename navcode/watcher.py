@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 IGNORED_DIRS: frozenset[str] = frozenset(
     {
-        ".codenav",
+        ".navcode",
         ".git",
         "__pycache__",
         "node_modules",
@@ -44,7 +44,7 @@ IGNORED_DIRS: frozenset[str] = frozenset(
 
 IGNORED_SUFFIXES: frozenset[str] = frozenset({".pyc", ".pyo"})
 
-PID_FILE_NAME = ".codenav/watcher.pid"
+PID_FILE_NAME = ".navcode/watcher.pid"
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ class CodebaseWatcher:
 
         Performs an initial full scan of *root*, then starts watchdog
         to process incremental changes.  The watcher PID is written to
-        ``.codenav/watcher.pid`` so external processes can check liveness.
+        ``.navcode/watcher.pid`` so external processes can check liveness.
         """
         if self.is_running():
             logger.warning("Watcher already running (PID {})", self._read_pid())
@@ -187,7 +187,7 @@ class CodebaseWatcher:
     def is_running(self) -> bool:
         """Return True if a watcher process recorded in the PID file is alive.
 
-        Checks the PID stored in ``.codenav/watcher.pid``; returns False if
+        Checks the PID stored in ``.navcode/watcher.pid``; returns False if
         the file is absent, unreadable, or the PID is no longer active.
         """
         pid = self._read_pid()

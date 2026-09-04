@@ -7,7 +7,7 @@ directed graphs using networkx:
 * ``import_graph`` — nodes are file paths, edges are import relationships.
 
 Both graphs can be serialised to / deserialised from
-``<root>/.codenav/graph.json`` using the networkx node-link format.
+``<root>/.navcode/graph.json`` using the networkx node-link format.
 """
 
 from __future__ import annotations
@@ -115,7 +115,7 @@ class CallGraph:
 
     Example::
 
-        cg = CallGraph(db_path=Path(".codenav/index.db"))
+        cg = CallGraph(db_path=Path(".navcode/index.db"))
         print(cg.get_hotspot_files())
     """
 
@@ -123,7 +123,7 @@ class CallGraph:
         """Build both graphs by reading the indexer's SQLite database.
 
         Args:
-            db_path: Path to the ``.codenav/index.db`` file produced by
+            db_path: Path to the ``.navcode/index.db`` file produced by
                 :class:`~navcode.indexer.CodebaseIndexer`.
         """
         if not db_path.exists():
@@ -367,7 +367,7 @@ class CallGraph:
         """Serialise both graphs to *path* as JSON (node-link format).
 
         Args:
-            path: Destination file (e.g. ``Path(".codenav/graph.json")``).
+            path: Destination file (e.g. ``Path(".navcode/graph.json")``).
         """
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {

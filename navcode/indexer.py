@@ -12,6 +12,8 @@ extraction will be handled by ``parser.py`` in a later feature branch.
 from __future__ import annotations
 
 import sqlite3
+import concurrent.futures
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -25,8 +27,32 @@ if TYPE_CHECKING:
 # Constants
 # ---------------------------------------------------------------------------
 
-DB_RELATIVE_PATH = ".codenav/index.db"
+DB_RELATIVE_PATH = ".navcode/index.db"
 CHUNK_LINES = 50
+
+# Extensions that are definitely binary — skip without reading
+_BINARY_SUFFIXES: frozenset[str] = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".tiff", ".svg",
+    ".mp3", ".mp4", ".wav", ".ogg", ".flac", ".avi", ".mov", ".mkv", ".webm",
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".exe", ".dll", ".so", ".dylib", ".whl", ".egg",
+    ".pyc", ".pyo", ".class",
+    ".ttf", ".otf", ".woff", ".woff2", ".eot",
+    ".db", ".sqlite", ".sqlite3",
+    ".bin", ".dat", ".o", ".a",
+})
+
+# Directory names to always skip
+_SKIP_DIRS: frozenset[str] = frozenset({
+    ".git", ".navcode", "__pycache__", "node_modules",
+    ".venv", "venv", "env", "dist", "build",
+    ".egg-info", ".tox", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", ".cache",
+})
+
+# Parallel workers for file I/O (CPU-bound parsing stays single-threaded via DB lock)
+_IO_WORKERS = 8
 
 # Map file extension → language tag
 _EXT_LANGUAGE: dict[str, str] = {
@@ -230,7 +256,7 @@ def _chunk_file(lines: list[str], chunk_size: int = CHUNK_LINES) -> list[tuple[i
 class CodebaseIndexer:
     """SQLite FTS5 indexer for a project codebase.
 
-    Opens (or creates) the index database at ``<root>/.codenav/index.db``
+    Opens (or creates) the index database at ``<root>/.navcode/index.db``
     and provides methods to add, remove, and query indexed files.
 
     Example::
@@ -245,7 +271,7 @@ class CodebaseIndexer:
 
         Args:
             root: Project root.  The database is stored at
-                ``<root>/.codenav/index.db``.
+                ``<root>/.navcode/index.db``.
         """
         self._root = root.resolve()
         self._db_path = self._root / DB_RELATIVE_PATH
@@ -258,7 +284,68 @@ class CodebaseIndexer:
     # Public API
     # ------------------------------------------------------------------
 
-    def index_file(self, path: Path, engine: EmbeddingsEngine | None = None) -> None:
+    @staticmethod
+    def should_skip(path: Path) -> bool:
+        """Return True if *path* should be excluded from indexing.
+
+        Skips binary files by extension and paths inside ignored directories.
+        """
+        # Skip known binary extensions immediately
+        if path.suffix.lower() in _BINARY_SUFFIXES:
+            return True
+        # Skip if any directory component is in the ignore list
+        for part in path.parts:
+            if part in _SKIP_DIRS or part.endswith(".egg-info"):
+                return True
+        return False
+
+    def index_files_parallel(
+        self,
+        paths: list[Path],
+        engine: "EmbeddingsEngine | None" = None,
+        callback: "Any | None" = None,
+    ) -> tuple[int, int]:
+        """Index *paths* using a thread pool for fast parallel I/O.
+
+        Reads are done concurrently; DB writes are serialised with a lock
+        so SQLite stays consistent.
+
+        Args:
+            paths: List of file paths to index.
+            engine: Optional embeddings engine (applied after DB write).
+            callback: Optional zero-argument callable invoked after each file
+                is processed (used to tick a progress bar).
+
+        Returns:
+            ``(indexed, failed)`` counts.
+        """
+        db_lock = threading.Lock()
+        indexed = 0
+        failed = 0
+        counters_lock = threading.Lock()
+
+        def _process(path: Path) -> None:
+            nonlocal indexed, failed
+            try:
+                if self.should_skip(path):
+                    return
+                self._index_file_inner(path, engine, db_lock)
+                with counters_lock:
+                    indexed += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Failed to index {}: {}", path, exc)
+                with counters_lock:
+                    failed += 1
+            finally:
+                if callback is not None:
+                    callback()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_IO_WORKERS) as pool:
+            list(pool.map(_process, paths))
+
+        return indexed, failed
+
+    def index_file(self, path: Path, engine: "EmbeddingsEngine | None" = None) -> None:
         """Parse and index *path*, replacing any existing entry.
 
         Reads the file, detects its language, chunks it into 50-line
@@ -271,6 +358,17 @@ class CodebaseIndexer:
                 instance.  When supplied, embeddings are computed and stored
                 for every symbol.  Failures are logged and never propagate.
         """
+        if self.should_skip(path):
+            return
+        self._index_file_inner(path, engine, threading.Lock())
+
+    def _index_file_inner(
+        self,
+        path: Path,
+        engine: "EmbeddingsEngine | None",
+        db_lock: threading.Lock,
+    ) -> None:
+        """Core index logic shared by index_file and index_files_parallel."""
         path = path.resolve()
         rel = self._rel(path)
 
@@ -290,60 +388,65 @@ class CodebaseIndexer:
         lines = text.splitlines(keepends=True)
         chunks = _chunk_file(lines)
 
-        with self._conn:
-            # Upsert file row
-            self._conn.execute(
-                """
-                INSERT INTO files (path, language, last_modified, size)
-                VALUES (:path, :lang, :mtime, :size)
-                ON CONFLICT(path) DO UPDATE SET
-                    language      = excluded.language,
-                    last_modified = excluded.last_modified,
-                    size          = excluded.size
-                """,
-                {
-                    "path": rel,
-                    "lang": language,
-                    "mtime": stat.st_mtime,
-                    "size": stat.st_size,
-                },
-            )
+        symbol_rows_data = [
+            (rel, f"{rel}:{line_start}-{line_end}", "chunk", line_start, line_end, content)
+            for line_start, line_end, content in chunks
+        ]
 
-            # Remove stale symbols (and their embeddings) then re-insert
-            self._conn.execute(
-                """
-                DELETE FROM embeddings
-                WHERE symbol_rowid IN (
-                    SELECT rowid FROM symbols WHERE path = ?
+        # Serialise all DB writes with the caller-supplied lock so threads
+        # don't interleave transactions on the single SQLite connection.
+        with db_lock:
+            with self._conn:
+                # Upsert file row
+                self._conn.execute(
+                    """
+                    INSERT INTO files (path, language, last_modified, size)
+                    VALUES (:path, :lang, :mtime, :size)
+                    ON CONFLICT(path) DO UPDATE SET
+                        language      = excluded.language,
+                        last_modified = excluded.last_modified,
+                        size          = excluded.size
+                    """,
+                    {
+                        "path": rel,
+                        "lang": language,
+                        "mtime": stat.st_mtime,
+                        "size": stat.st_size,
+                    },
                 )
-                """,
-                (rel,),
-            )
-            self._conn.execute("DELETE FROM symbols WHERE path = ?", (rel,))
-            self._conn.executemany(
-                """
-                INSERT INTO symbols (path, symbol_name, symbol_type, line_start, line_end, content)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (rel, f"{rel}:{line_start}-{line_end}", "chunk", line_start, line_end, content)
-                    for line_start, line_end, content in chunks
-                ],
-            )
 
-        # Embed symbols if an engine was supplied
+                # Remove stale symbols (and their embeddings) then re-insert
+                self._conn.execute(
+                    """
+                    DELETE FROM embeddings
+                    WHERE symbol_rowid IN (
+                        SELECT rowid FROM symbols WHERE path = ?
+                    )
+                    """,
+                    (rel,),
+                )
+                self._conn.execute("DELETE FROM symbols WHERE path = ?", (rel,))
+                self._conn.executemany(
+                    """
+                    INSERT INTO symbols (path, symbol_name, symbol_type, line_start, line_end, content)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    symbol_rows_data,
+                )
+
+        # Embed symbols if an engine was supplied (outside lock — compute-heavy)
         if engine is not None:
             symbols_rows = self.get_file_symbols(path)
             for row in symbols_rows:
                 symbol_name = row["symbol_name"]
                 symbol_type = row["symbol_type"]
                 content = row["content"]
-                # Fetch the rowid for this symbol
-                cur = self._conn.execute(
-                    "SELECT rowid FROM symbols WHERE path = ? AND symbol_name = ? LIMIT 1",
-                    (rel, symbol_name),
-                )
-                result = cur.fetchone()
+                with db_lock:
+                    cur = self._conn.execute(
+                        "SELECT rowid FROM symbols WHERE path = ? AND symbol_name = ? LIMIT 1",
+                        (rel, symbol_name),
+                    )
+                    result = cur.fetchone()
                 if result is None:
                     continue
                 symbol_rowid = result[0]
@@ -621,10 +724,13 @@ class CodebaseIndexer:
     # ------------------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
-        """Open the SQLite connection with WAL mode for concurrent access."""
+        """Open the SQLite connection with WAL + performance PRAGMAs."""
         conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-32768")   # 32 MB page cache
+        conn.execute("PRAGMA mmap_size=268435456") # 256 MB mmap
+        conn.execute("PRAGMA temp_store=MEMORY")
         conn.row_factory = sqlite3.Row
         return conn
 
