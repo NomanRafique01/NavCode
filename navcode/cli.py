@@ -62,7 +62,8 @@ def _setup_logging() -> None:
 
 
 @app.callback()
-def main(
+def app_startup(
+    ctx: typer.Context,
     version: Optional[bool] = typer.Option(
         None,
         "--version",
@@ -72,10 +73,77 @@ def main(
         is_eager=True,
     ),
 ) -> None:
-    """navcode — codebase intelligence layer for AI coding agents."""
-    from navcode._bootstrap import ensure_model
+    """Runs before every CLI command."""
     _setup_logging()
-    ensure_model()
+
+    # Step 1 — heal ~/.navcode/ if deleted
+    from navcode._bootstrap import ensure_model, is_model_ready
+    if not is_model_ready():
+        _console.print(
+            "[yellow]⚠ navcode model missing — re-downloading...[/yellow]"
+        )
+        ensure_model()
+
+    # Step 2 — heal .codenav/ if deleted
+    # Skip for init — it creates .codenav/ itself
+    if ctx.invoked_subcommand == "init":
+        return
+
+    project_root = Path.cwd()
+    codenav_dir = project_root / ".codenav"
+    if not codenav_dir.exists():
+        _console.print(
+            "[yellow]⚠ .codenav/ missing — running auto-reindex...[/yellow]"
+        )
+        _auto_heal(project_root)
+
+
+def _auto_heal(project_root: Path) -> None:
+    """Recreate .codenav/ and reindex from scratch."""
+    from navcode.indexer import CodebaseIndexer
+    from navcode.embeddings import EmbeddingsEngine
+    from navcode.graph import CallGraph
+    from navcode.watcher import CodebaseWatcher
+
+    codenav_dir = project_root / ".codenav"
+    codenav_dir.mkdir(exist_ok=True)
+
+    # Re-add to .gitignore if needed
+    gitignore = project_root / ".gitignore"
+    if gitignore.exists():
+        content = gitignore.read_text()
+        if ".codenav/" not in content:
+            gitignore.write_text(content + "\n.codenav/\n")
+
+    _console.print("[dim]Rebuilding index...[/dim]")
+
+    db_path = codenav_dir / "index.db"
+    indexer = CodebaseIndexer(db_path)
+
+    try:
+        engine = EmbeddingsEngine()
+    except Exception:
+        engine = None
+
+    files = [f for f in project_root.rglob("*") if f.is_file()]
+    indexed = 0
+    for f in files:
+        try:
+            indexer.index_file(f, engine)
+            indexed += 1
+        except Exception:
+            pass
+
+    graph = CallGraph(codenav_dir / "index.db")
+    graph.save(codenav_dir / "graph.json")
+
+    watcher = CodebaseWatcher(project_root, indexer)
+    watcher.start()
+
+    _console.print(
+        f"[green]✓ Auto-healed:[/green] "
+        f"{indexed} files indexed, graph rebuilt, watcher started"
+    )
 
 
 # ---------------------------------------------------------------------------

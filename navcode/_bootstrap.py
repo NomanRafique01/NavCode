@@ -99,6 +99,18 @@ def ensure_model() -> None:
     _ensure_tokenizer_files()
 
 
+def is_model_ready() -> bool:
+    """Check if model and all tokenizer files are present."""
+    required = [
+        Path.home() / ".navcode" / "models" / "model_quantized.onnx",
+        Path.home() / ".navcode" / "models" / "tokenizer.json",
+        Path.home() / ".navcode" / "models" / "tokenizer_config.json",
+        Path.home() / ".navcode" / "models" / "vocab.txt",
+        Path.home() / ".navcode" / "models" / "special_tokens_map.json",
+    ]
+    return all(f.exists() for f in required)
+
+
 def _ensure_tokenizer_files() -> None:
     """Download any missing tokenizer files from HuggingFace."""
     models_dir = MODEL_PATH.parent
