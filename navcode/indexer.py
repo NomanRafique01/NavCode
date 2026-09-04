@@ -354,7 +354,7 @@ class CodebaseIndexer:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Embedding failed for {} ({}): {}", rel, symbol_name, exc)
 
-        logger.debug("Indexed {} ({} chunks, lang={})", rel, len(chunks), language)
+        logger.trace("Indexed {} ({} chunks, lang={})", rel, len(chunks), language)
 
     def remove_file(self, path: Path) -> None:
         """Remove *path* and all its symbols from the index.

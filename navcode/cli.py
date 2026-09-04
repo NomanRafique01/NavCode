@@ -8,6 +8,14 @@ from typing import Optional
 import typer
 from loguru import logger
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from navcode import __version__
 
 # Force UTF-8 output on Windows so Rich unicode symbols don't crash cp1252
@@ -115,8 +123,6 @@ def _auto_heal(project_root: Path) -> None:
         if ".codenav/" not in content:
             gitignore.write_text(content + "\n.codenav/\n")
 
-    _console.print("[dim]Rebuilding index...[/dim]")
-
     db_path = codenav_dir / "index.db"
     indexer = CodebaseIndexer(db_path)
 
@@ -126,24 +132,46 @@ def _auto_heal(project_root: Path) -> None:
         engine = None
 
     files = [f for f in project_root.rglob("*") if f.is_file()]
+    total = len(files)
     indexed = 0
-    for f in files:
-        try:
-            indexer.index_file(f, engine)
-            indexed += 1
-        except Exception:
-            pass
+    failed = 0
 
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]Indexing[/bold blue]"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("[dim]{task.fields[current_file]}[/dim]"),
+        console=_console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("indexing", total=total, current_file="")
+        for f in files:
+            rel = str(f.relative_to(project_root))
+            display = rel if len(rel) <= 40 else "..." + rel[-37:]
+            progress.update(task, current_file=display)
+            try:
+                indexer.index_file(f, engine)
+                indexed += 1
+            except Exception:
+                failed += 1
+            progress.advance(task)
+
+    _console.print(
+        f"[green]✓[/green] Indexed [bold]{indexed}[/bold] files"
+        + (f" [yellow]({failed} skipped)[/yellow]" if failed else "")
+    )
+
+    _console.print("[dim]Building call graph...[/dim]")
     graph = CallGraph(codenav_dir / "index.db")
     graph.save(codenav_dir / "graph.json")
+    _console.print("[green]✓[/green] Graph built")
 
     watcher = CodebaseWatcher(project_root, indexer)
     watcher.start()
-
-    _console.print(
-        f"[green]✓ Auto-healed:[/green] "
-        f"{indexed} files indexed, graph rebuilt, watcher started"
-    )
+    _console.print("[green]✓[/green] Watcher started")
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +214,6 @@ def init(
     _console.print("[bold green]navcode init[/bold green]\n")
 
     # Index codebase
-    _console.print("Indexing codebase...")
     indexer = CodebaseIndexer(codenav_dir / "index.db")
     from navcode.embeddings import EmbeddingsEngine
     try:
@@ -195,19 +222,41 @@ def init(
         engine = None
         _console.print("[yellow]Embeddings unavailable - using FTS5 only[/yellow]")
 
-    files = list(project_root.rglob("*"))
+    files = [f for f in project_root.rglob("*") if f.is_file()]
+    total = len(files)
     indexed = 0
-    for f in files:
-        if f.is_file():
+    failed = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]Indexing[/bold blue]"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("[dim]{task.fields[current_file]}[/dim]"),
+        console=_console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("indexing", total=total, current_file="")
+        for f in files:
+            rel = str(f.relative_to(project_root))
+            display = rel if len(rel) <= 40 else "..." + rel[-37:]
+            progress.update(task, current_file=display)
             try:
                 indexer.index_file(f, engine)
                 indexed += 1
             except Exception:
-                pass
-    _console.print(f"[green]✓[/green] Indexed {indexed} files")
+                failed += 1
+            progress.advance(task)
+
+    _console.print(
+        f"[green]✓[/green] Indexed [bold]{indexed}[/bold] files"
+        + (f" [yellow]({failed} skipped)[/yellow]" if failed else "")
+    )
 
     # Build graph
-    _console.print("Building call graph...")
+    _console.print("[dim]Building call graph...[/dim]")
     graph = CallGraph(codenav_dir / "index.db")
     graph.save(codenav_dir / "graph.json")
     _console.print("[green]✓[/green] Call graph built")
@@ -320,7 +369,6 @@ def reindex() -> None:
     from navcode.indexer import CodebaseIndexer
     from navcode.embeddings import EmbeddingsEngine
     from navcode.graph import CallGraph
-    from rich.progress import Progress
 
     project_root = Path.cwd()
     codenav_dir = project_root / ".codenav"
@@ -341,13 +389,26 @@ def reindex() -> None:
         _console.print("[yellow]⚠ Embeddings unavailable — FTS5 only[/yellow]")
 
     files = [f for f in project_root.rglob("*") if f.is_file()]
-
+    total = len(files)
     indexed = 0
     failed = 0
 
-    with Progress() as progress:
-        task = progress.add_task("Indexing...", total=len(files))
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]Indexing[/bold blue]"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("[dim]{task.fields[current_file]}[/dim]"),
+        console=_console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("indexing", total=total, current_file="")
         for f in files:
+            rel = str(f.relative_to(project_root))
+            display = rel if len(rel) <= 40 else "..." + rel[-37:]
+            progress.update(task, current_file=display)
             try:
                 indexer.index_file(f, engine)
                 indexed += 1
@@ -355,14 +416,15 @@ def reindex() -> None:
                 failed += 1
             progress.advance(task)
 
+    _console.print(
+        f"[green]✓[/green] Indexed [bold]{indexed}[/bold] files"
+        + (f" [yellow]({failed} skipped)[/yellow]" if failed else "")
+    )
+
     # Rebuild graph
-    _console.print("Rebuilding call graph...")
+    _console.print("[dim]Rebuilding call graph...[/dim]")
     graph = CallGraph(codenav_dir / "index.db")
     graph.save(codenav_dir / "graph.json")
-
-    _console.print(f"\n[green]✓[/green] Indexed: {indexed} files")
-    if failed:
-        _console.print(f"[yellow]⚠ Skipped: {failed} files[/yellow]")
     _console.print("[green]✓[/green] Graph rebuilt")
     _console.print("[bold green]Reindex complete.[/bold green]")
 

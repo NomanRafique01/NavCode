@@ -72,7 +72,7 @@ def ensure_model() -> None:
     can still load (the model will be re-attempted on ``navcode init``).
     """
     if MODEL_PATH.exists():
-        logger.debug("ONNX model already present at {}", MODEL_PATH)
+        logger.trace("ONNX model already present at {}", MODEL_PATH)
         _ensure_tokenizer_files()
         return
     else:
@@ -119,7 +119,7 @@ def _ensure_tokenizer_files() -> None:
     for filename in _TOKENIZER_FILES:
         dest = models_dir / filename
         if dest.exists():
-            logger.debug("Tokenizer file already present: {}", filename)
+            logger.trace("Tokenizer file already present: {}", filename)
             continue
 
         url = f"{_HF_BASE}/{filename}"
