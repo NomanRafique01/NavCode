@@ -1,6 +1,6 @@
 [project]
 name = "navcode"
-version = "0.1.1"
+version = "0.1.2"
 description = "Codebase intelligence layer for AI coding agents — 80-90% token reduction"
 authors = [{name = "Noman Rafique", email = "nomanrafique01@gmail.com"}]
 license = "MIT"
