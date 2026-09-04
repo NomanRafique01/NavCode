@@ -1,12 +1,28 @@
 """File-system watcher for navcode.
 
 Monitors a project root for file changes and notifies the indexer.
-Runs on a background daemon thread using the watchdog library.
+The watcher runs as a completely separate background process (daemon) so
+it survives after the ``navcode init`` command exits.
+
+Public helpers
+--------------
+start_daemon(root)   – Launch the watcher daemon process and return its PID.
+stop_daemon(root)    – Kill the running daemon and remove the PID file.
+is_daemon_running(root) – Return True if the PID file exists and the process is alive.
+
+The actual long-running loop lives in :mod:`navcode._watcher_daemon` which is
+invoked as ``python -m navcode._watcher_daemon <root>``.
+
+The :class:`CodebaseWatcher` class is kept for use *inside* the daemon process
+itself (and for tests).
 """
 
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -52,6 +68,17 @@ PID_FILE_NAME = ".navcode/watcher.pid"
 # ---------------------------------------------------------------------------
 
 
+def _pid_path(root: Path) -> Path:
+    return root.resolve() / PID_FILE_NAME
+
+
+def _read_pid(root: Path) -> int | None:
+    try:
+        return int(_pid_path(root).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
 def _is_ignored(path: str) -> bool:
     """Return True if *path* should be skipped by the watcher."""
     parts = Path(path).parts
@@ -60,6 +87,99 @@ def _is_ignored(path: str) -> bool:
             return True
     suffix = Path(path).suffix
     return suffix in IGNORED_SUFFIXES
+
+
+# ---------------------------------------------------------------------------
+# Public daemon management API
+# ---------------------------------------------------------------------------
+
+
+def is_daemon_running(root: Path) -> bool:
+    """Return True if the watcher daemon recorded in the PID file is alive."""
+    pid = _read_pid(root)
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)  # signal 0 = existence check, no signal sent
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def start_daemon(root: Path) -> int:
+    """Launch the watcher as a detached background process and return its PID.
+
+    On Windows the ``DETACHED_PROCESS`` creation flag is used so the child
+    is completely decoupled from the parent console.  On POSIX
+    ``start_new_session=True`` achieves the same result.
+
+    The daemon writes its own PID to ``.navcode/watcher.pid`` once it is
+    ready, so callers should not read the PID file immediately; use
+    :func:`is_daemon_running` to poll liveness instead.
+    """
+    root = root.resolve()
+
+    # Ensure the .navcode directory exists so the daemon can write its PID.
+    (root / ".navcode").mkdir(parents=True, exist_ok=True)
+
+    cmd = [sys.executable, "-m", "navcode._watcher_daemon", str(root)]
+
+    if sys.platform == "win32":
+        # DETACHED_PROCESS (0x00000008) + CREATE_NEW_PROCESS_GROUP (0x00000200)
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        proc = subprocess.Popen(
+            cmd,
+            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        proc = subprocess.Popen(
+            cmd,
+            start_new_session=True,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    return proc.pid
+
+
+def stop_daemon(root: Path) -> bool:
+    """Kill the running watcher daemon.
+
+    Returns True if a process was killed, False if no daemon was running.
+    The PID file is removed regardless.
+    """
+    root = root.resolve()
+    pid = _read_pid(root)
+    killed = False
+
+    if pid is not None:
+        try:
+            if sys.platform == "win32":
+                subprocess.call(
+                    ["taskkill", "/F", "/PID", str(pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                os.kill(pid, signal.SIGTERM)
+            killed = True
+        except (ProcessLookupError, OSError):
+            pass  # process already gone
+
+    pid_file = _pid_path(root)
+    try:
+        pid_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    return killed
 
 
 # ---------------------------------------------------------------------------
@@ -109,52 +229,37 @@ class _NavcodeEventHandler(FileSystemEventHandler):
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# CodebaseWatcher — used inside the daemon process
 # ---------------------------------------------------------------------------
 
 
 class CodebaseWatcher:
-    """Background file-system watcher for a project directory.
+    """In-process file-system watcher (used by the daemon).
 
-    Uses watchdog to monitor *root* for changes and delegates all
-    indexing operations to the supplied :class:`~navcode.indexer.CodebaseIndexer`.
+    For background daemon management from the CLI use :func:`start_daemon`,
+    :func:`stop_daemon`, and :func:`is_daemon_running` instead.
 
     Example::
 
         watcher = CodebaseWatcher(root=Path("."), indexer=my_indexer)
-        watcher.start()   # returns immediately; watcher runs in background
+        watcher.start()   # returns immediately; watcher runs in background thread
         ...
         watcher.stop()
     """
 
     def __init__(self, root: Path, indexer: "CodebaseIndexer") -> None:
-        """Initialise the watcher.
-
-        Args:
-            root: Project root directory to watch recursively.
-            indexer: Indexer instance that will handle file events.
-        """
         self._root = root.resolve()
         self._indexer = indexer
         self._observer: Observer | None = None
         self._thread: threading.Thread | None = None
-        self._pid_file = self._root / PID_FILE_NAME
+        self._pid_file = _pid_path(root)
 
     # ------------------------------------------------------------------
     # Public methods
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Start the background watcher thread.
-
-        Performs an initial full scan of *root*, then starts watchdog
-        to process incremental changes.  The watcher PID is written to
-        ``.navcode/watcher.pid`` so external processes can check liveness.
-        """
-        if self.is_running():
-            logger.warning("Watcher already running (PID {})", self._read_pid())
-            return
-
+        """Start the background watcher thread and write the PID file."""
         logger.info("Starting watcher for {}", self._root)
         self._initial_scan()
 
@@ -165,7 +270,7 @@ class CodebaseWatcher:
         self._thread = threading.Thread(
             target=self._run_observer,
             name="navcode-watcher",
-            daemon=True,
+            daemon=False,  # keep the process alive
         )
         self._thread.start()
         self._write_pid()
@@ -184,20 +289,10 @@ class CodebaseWatcher:
         self._remove_pid()
         logger.info("Watcher stopped")
 
-    def is_running(self) -> bool:
-        """Return True if a watcher process recorded in the PID file is alive.
-
-        Checks the PID stored in ``.navcode/watcher.pid``; returns False if
-        the file is absent, unreadable, or the PID is no longer active.
-        """
-        pid = self._read_pid()
-        if pid is None:
-            return False
-        try:
-            os.kill(pid, 0)  # signal 0 = existence check, no signal sent
-            return True
-        except (ProcessLookupError, PermissionError):
-            return False
+    def join(self) -> None:
+        """Block until the observer thread exits (used by the daemon)."""
+        if self._thread is not None:
+            self._thread.join()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -222,9 +317,6 @@ class CodebaseWatcher:
         except Exception as exc:  # pragma: no cover
             logger.error("Watcher observer error: {}", exc)
 
-    def _pid_path(self) -> Path:
-        return self._pid_file
-
     def _write_pid(self) -> None:
         self._pid_file.parent.mkdir(parents=True, exist_ok=True)
         self._pid_file.write_text(str(os.getpid()), encoding="utf-8")
@@ -234,9 +326,3 @@ class CodebaseWatcher:
             self._pid_file.unlink(missing_ok=True)
         except OSError as exc:
             logger.warning("Could not remove PID file: {}", exc)
-
-    def _read_pid(self) -> int | None:
-        try:
-            return int(self._pid_file.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            return None

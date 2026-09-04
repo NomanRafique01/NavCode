@@ -8,6 +8,10 @@ from typing import Any, Optional
 import typer
 from loguru import logger
 from rich.console import Console
+from rich.panel import Panel
+from rich.padding import Padding
+from rich.text import Text
+from rich.rule import Rule
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -35,31 +39,129 @@ app = typer.Typer(
 _console = Console()
 
 # ---------------------------------------------------------------------------
-# Version flag
+# Agent metadata  (name → border color, emoji)
 # ---------------------------------------------------------------------------
 
-_AGENTS = [
-    "claude",
-    "cursor",
-    "codex",
-    "copilot",
-    "bob",
-    "kimi",
-    "antigravity",
-    "windsurf",
-    "continue",
-]
+_AGENT_META: dict[str, tuple[str, str]] = {
+    "claude":      ("cyan",  "🤖"),
+    "cursor":      ("cyan",  "⚡"),
+    "bob":         ("cyan",  "🔵"),
+    "codex":       ("cyan",  "🟠"),
+    "copilot":     ("cyan",  "🐙"),
+    "kimi":        ("cyan",  "🌙"),
+    "windsurf":    ("cyan",  "🏄"),
+    "antigravity": ("cyan",  "🚀"),
+    "continue":    ("cyan",  "▶️ "),
+}
+
+_AGENTS = list(_AGENT_META.keys())
+
+# ---------------------------------------------------------------------------
+# Visual helpers
+# ---------------------------------------------------------------------------
+
+_BANNER_COLORS = ["bright_cyan"] * 6
+
+
+def _print_banner() -> None:
+    """Print the big ASCII art banner in bright_cyan."""
+    lines = [
+        "  ███╗   ██╗ █████╗ ██╗   ██╗ ██████╗ ██████╗ ██████╗ ███████╗",
+        "  ████╗  ██║██╔══██╗██║   ██║██╔════╝██╔═══██╗██╔══██╗██╔════╝",
+        "  ██╔██╗ ██║███████║██║   ██║██║     ██║   ██║██║  ██║█████╗  ",
+        "  ██║╚██╗██║██╔══██║╚██╗ ██╔╝██║     ██║   ██║██║  ██║██╔══╝  ",
+        "  ██║ ╚████║██║  ██║ ╚████╔╝ ╚██████╗╚██████╔╝██████╔╝███████╗",
+        "  ╚═╝  ╚═══╝╚═╝  ╚═╝  ╚═══╝   ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝",
+    ]
+
+    # pad last line to match others
+    max_len = max(len(l) for l in lines)
+    lines = [l.ljust(max_len) for l in lines]
+
+    _console.print()
+    for line in lines:
+        _console.print(f"[bold bright_cyan]{line}[/bold bright_cyan]")
+    _console.print(
+        f"\n[dim cyan]  Codebase intelligence layer for AI coding agents  "
+        f"·  v{__version__}[/dim cyan]\n",
+        justify="left",
+    )
+    _divider()
+    
+
+
+def _divider(label: str = "") -> None:
+    """Print a cyan rule line, optionally with a centred label."""
+    if label:
+        _console.print(Rule(f"[bold cyan] {label} [/bold cyan]", style="cyan"))
+    else:
+        _console.print(Rule(style="cyan"))
+
+
+def _ok(msg: str) -> None:
+    """Bright-cyan checkmark line."""
+    _console.print(f"[bold bright_cyan]  ✓[/bold bright_cyan]  [bright_cyan]{msg}[/bright_cyan]")
+
+
+def _note(msg: str) -> None:
+    """Soft cyan informational line — not an error, not a warning."""
+    _console.print(f"[bold cyan]  ℹ[/bold cyan]  [cyan]{msg}[/cyan]")
+
+
+def _warn(msg: str) -> None:
+    """Yellow warning line."""
+    _console.print(f"[bold yellow]  ⚠[/bold yellow]  [yellow]{msg}[/yellow]")
+
+
+def _info(msg: str) -> None:
+    """Dim cyan tip / note."""
+    _console.print(f"[dim cyan]  {msg}[/dim cyan]")
+
+
+def _path(p: "str | Path") -> str:
+    """Return a Rich-markup string that renders the path in cyan."""
+    return f"[bold cyan]{p}[/bold cyan]"
+
+
+def _cmd(c: str) -> str:
+    """Return a Rich-markup string that renders the command in bold cyan on dark background."""
+    return f"[bold cyan on grey7]  {c}  [/bold cyan on grey7]"
+
+
+def _agent_panel(key: str, body: str, *, subtitle: str = "") -> Panel:
+    """Build a Rich Panel for an agent with cyan border."""
+    _, emoji = _AGENT_META.get(key, ("cyan", "•"))
+    from navcode.adapters import ALL_ADAPTERS
+    display_name = ALL_ADAPTERS[key].NAME if key in ALL_ADAPTERS else key.title()
+    title = Text(f" {emoji}  {display_name} ", style="bold cyan")
+    inner = Padding(body, (1, 2))
+    return Panel(
+        inner,
+        title=title,
+        subtitle=Text(f" {subtitle} ", style="dim cyan") if subtitle else None,
+        border_style="cyan",
+        expand=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Version flag
+# ---------------------------------------------------------------------------
 
 
 def _version_callback(value: bool) -> None:
     """Print version and exit."""
     if value:
-        _console.print(f"navcode [bold cyan]{__version__}[/bold cyan]")
+        _console.print(
+            f"[bold bright_cyan]navcode[/bold bright_cyan] "
+            f"[bold cyan]{__version__}[/bold cyan]"
+        )
         raise typer.Exit()
 
 
 def _setup_logging() -> None:
     """Activate file logging into .navcode/navcode.log if the dir exists."""
+    logger.remove()  # silence default stderr handler — only log to file
     log_dir = Path.cwd() / ".navcode"
     if log_dir.exists():
         logger.add(
@@ -89,9 +191,7 @@ def app_startup(
     # Step 1 — heal ~/.navcode/ if deleted
     from navcode._bootstrap import ensure_model, is_model_ready
     if not is_model_ready():
-        _console.print(
-            "[yellow]⚠ navcode model missing — re-downloading...[/yellow]"
-        )
+        _warn("navcode model missing — re-downloading...")
         ensure_model()
 
     # Step 2 — heal .navcode/ if deleted
@@ -102,9 +202,7 @@ def app_startup(
     project_root = Path.cwd()
     codenav_dir = project_root / ".navcode"
     if not codenav_dir.exists():
-        _console.print(
-            "[yellow]⚠ .navcode/ missing — running auto-reindex...[/yellow]"
-        )
+        _warn(".navcode/ missing — running auto-reindex...")
         _auto_heal(project_root)
 
 
@@ -129,42 +227,39 @@ def _collect_files(root: Path) -> list[Path]:
     return result
 
 
-def _make_progress() -> Progress:
-    """Return a polished Rich Progress instance for indexing operations."""
-    return Progress(
+def _make_progress(total: int) -> "tuple[Progress, Any]":
+    """Create and return a single Rich Progress bar pre-loaded with one task."""
+    progress = Progress(
         SpinnerColumn(spinner_name="dots", style="bold cyan"),
-        TextColumn("[bold cyan]Indexing[/bold cyan]"),
-        BarColumn(bar_width=None, complete_style="cyan", finished_style="green"),
+        TextColumn("[bold cyan]{task.description}[/bold cyan]"),
+        BarColumn(bar_width=None, complete_style="bright_cyan", finished_style="bright_cyan"),
         TaskProgressColumn(),
         MofNCompleteColumn(),
-        TextColumn("[dim]•[/dim]"),
+        TextColumn("[dim cyan]•[/dim cyan]"),
         TimeElapsedColumn(),
-        TextColumn("[dim]eta[/dim]"),
+        TextColumn("[dim cyan]eta[/dim cyan]"),
         TimeRemainingColumn(),
-        TextColumn("[dim]{task.fields[current_file]}[/dim]"),
         console=_console,
-        transient=True,
+        transient=False,
         expand=True,
     )
+    task = progress.add_task("Initialising", total=total)
+    return progress, task
 
 
 def _run_index(
     indexer: "Any",
     files: list[Path],
     engine: "Any | None",
-    label: str = "Indexing",
+    progress: "Any",
+    task: "Any",
 ) -> tuple[int, int]:
-    """Run parallel indexing with a live progress bar.  Returns (indexed, failed)."""
-    total = len(files)
+    """Run parallel indexing, advancing *task* on the shared *progress* bar."""
 
-    with _make_progress() as progress:
-        task = progress.add_task(label, total=total, current_file="")
+    def _tick() -> None:
+        progress.advance(task)
 
-        def _tick() -> None:
-            progress.advance(task)
-
-        indexed, failed = indexer.index_files_parallel(files, engine=engine, callback=_tick)
-
+    indexed, failed = indexer.index_files_parallel(files, engine=engine, callback=_tick)
     return indexed, failed
 
 
@@ -185,8 +280,8 @@ def _auto_heal(project_root: Path) -> None:
         if ".navcode/" not in content:
             gitignore.write_text(content + "\n.navcode/\n")
 
-    db_path = codenav_dir / "index.db"
-    indexer = CodebaseIndexer(db_path)
+    # CodebaseIndexer takes the project root; it builds the db path internally.
+    indexer = CodebaseIndexer(project_root)
 
     try:
         engine = EmbeddingsEngine()
@@ -194,21 +289,22 @@ def _auto_heal(project_root: Path) -> None:
         engine = None
 
     files = _collect_files(project_root)
-    indexed, failed = _run_index(indexer, files, engine)
+    # +1 step for graph building
+    progress, task = _make_progress(len(files) + 1)
+    with progress:
+        progress.update(task, description="Indexing")
+        indexed, failed = _run_index(indexer, files, engine, progress, task)
+        progress.update(task, description="Building graph")
+        graph = CallGraph(codenav_dir / "index.db")
+        graph.save(codenav_dir / "graph.json")
+        progress.advance(task)
 
-    _console.print(
-        f"[green]✓[/green] Indexed [bold]{indexed}[/bold] files"
-        + (f" [yellow]({failed} failed)[/yellow]" if failed else "")
-    )
-
-    _console.print("[dim]Building call graph...[/dim]")
-    graph = CallGraph(codenav_dir / "index.db")
-    graph.save(codenav_dir / "graph.json")
-    _console.print("[green]✓[/green] Graph built")
+    _ok(f"Indexed [bold]{indexed}[/bold] files" + (f"  [bold red]({failed} failed)[/bold red]" if failed else ""))
+    _ok("Call graph built")
 
     watcher = CodebaseWatcher(project_root, indexer)
     watcher.start()
-    _console.print("[green]✓[/green] Watcher started")
+    _ok("Watcher started")
 
 
 # ---------------------------------------------------------------------------
@@ -232,11 +328,21 @@ def init(
     """Initialize navcode in this project for selected agents."""
     from navcode.adapters import ALL_ADAPTERS
     from navcode.indexer import CodebaseIndexer
-    from navcode.watcher import CodebaseWatcher
     from navcode.graph import CallGraph
 
     project_root = Path.cwd()
     codenav_dir = project_root / ".navcode"
+    db_path = codenav_dir / "index.db"
+
+    # True only when both the folder AND the database are present
+    already_indexed = codenav_dir.exists() and db_path.exists()
+
+    if already_indexed:
+        _note("navcode already initialised — skipping re-index.")
+        return
+
+    _print_banner()
+
     codenav_dir.mkdir(exist_ok=True)
 
     # Update .gitignore
@@ -248,36 +354,47 @@ def init(
     else:
         gitignore.write_text(".navcode/\n")
 
-    _console.print("[bold green]navcode init[/bold green]\n")
+    # CodebaseIndexer takes the project root; it resolves the db path internally.
+    indexer = CodebaseIndexer(project_root)
 
-    # Index codebase
-    indexer = CodebaseIndexer(codenav_dir / "index.db")
-    from navcode.embeddings import EmbeddingsEngine
-    try:
-        engine = EmbeddingsEngine()
-    except Exception:
-        engine = None
-        _console.print("[yellow]⚠ Embeddings unavailable — FTS5 only[/yellow]")
+    if False:
+        pass
+    else:
+        _divider("Indexing Codebase")
 
-    files = _collect_files(project_root)
-    _console.print(f"[dim]Found {len(files)} files to index[/dim]")
-    indexed, failed = _run_index(indexer, files, engine)
+        from navcode.embeddings import EmbeddingsEngine
+        try:
+            engine = EmbeddingsEngine()
+        except Exception:
+            engine = None
+            _warn("Embeddings unavailable — falling back to FTS5 only")
 
-    _console.print(
-        f"[green]✓[/green] Indexed [bold]{indexed}[/bold] files"
-        + (f" [yellow]({failed} failed)[/yellow]" if failed else "")
-    )
+        files = _collect_files(project_root)
+        _info(f"Found {len(files)} files to index")
 
-    # Build graph
-    _console.print("[dim]Building call graph...[/dim]")
-    graph = CallGraph(codenav_dir / "index.db")
-    graph.save(codenav_dir / "graph.json")
-    _console.print("[green]✓[/green] Call graph built")
+        # Single unified progress bar: one step per file + one step for graph build
+        progress, task = _make_progress(len(files) + 1)
+        with progress:
+            progress.update(task, description="Indexing")
+            indexed, failed = _run_index(indexer, files, engine, progress, task)
+            progress.update(task, description="Building graph")
+            graph = CallGraph(codenav_dir / "index.db")
+            graph.save(codenav_dir / "graph.json")
+            progress.advance(task)
 
-    # Start watcher
-    watcher = CodebaseWatcher(project_root, indexer)
-    watcher.start()
-    _console.print("[green]✓[/green] File watcher started")
+        _ok(
+            f"Indexed [bold]{indexed}[/bold] files"
+            + (f"  [bold red]({failed} failed)[/bold red]" if failed else "")
+        )
+        _ok("Call graph built")
+
+    # Start background watcher daemon (detached process, survives after init exits)
+    from navcode.watcher import is_daemon_running, start_daemon
+    if is_daemon_running(project_root):
+        _note("Watcher already running — skipping.")
+    else:
+        start_daemon(project_root)
+        _ok("File watcher started")
 
     # Determine which agents to install
     selected: dict = {}
@@ -293,87 +410,163 @@ def init(
         "continue":    continuee,
     }
 
+    _divider("Agent Detection")
+
     if auto:
-        _console.print("\nScanning for installed agents...")
+        _info("Scanning for installed agents...")
+        _console.print()
         for name, AdapterClass in ALL_ADAPTERS.items():
             adapter = AdapterClass(project_root)
             detected = adapter.is_detected()
-            status = "[green]✓[/green]" if detected else "[dim]✗[/dim]"
-            _console.print(f"  {status} {AdapterClass.NAME}")
+            _, emoji = _AGENT_META.get(name, ("cyan", "•"))
+            status = f"[bold bright_cyan]✓  detected[/bold bright_cyan]" if detected else "[dim white]✗  not found[/dim white]"
+            _console.print(f"  {emoji}  [bold cyan]{AdapterClass.NAME:<20}[/bold cyan]  {status}")
             if detected:
                 selected[name] = AdapterClass
+        _console.print()
     else:
         for name, enabled in flags.items():
             if enabled:
                 selected[name] = ALL_ADAPTERS[name]
 
     if not selected:
-        _console.print(
-            "\n[yellow]No agents selected.[/yellow] "
-            "Use --claude, --cursor, --auto etc."
-        )
+        _console.print()
+        _warn("No agents selected.")
+        _info("Use --claude, --cursor, --auto etc. to select agents.")
+        _console.print(f"\n  Run: {_cmd('navcode init --auto')}\n")
         raise typer.Exit()
 
     # Install each selected adapter
-    _console.print("\nInstalling for selected agents...\n")
+    _divider("Installing Agents")
+    _console.print()
+
     for name, AdapterClass in selected.items():
         adapter = AdapterClass(project_root)
         try:
             adapter.install()
-            _console.print(f"[bold]\\[{AdapterClass.NAME}][/bold]")
-            _console.print("  [green]✓[/green] Installed\n")
+            body = (
+                f"[bold bright_cyan]✓  Installed successfully[/bold bright_cyan]\n\n"
+                f"[dim cyan]navcode MCP tools and instruction file are now active.[/dim cyan]"
+            )
+            _console.print(_agent_panel(name, body, subtitle="installed"))
+            _console.print()
         except Exception as e:
-            _console.print(f"[red]✗ {AdapterClass.NAME}: {e}[/red]\n")
+            _console.print(
+                Panel(
+                    Padding(f"[bold red]✗  {e}[/bold red]", (1, 2)),
+                    title=f"[bold red] {AdapterClass.NAME} [/bold red]",
+                    border_style="red",
+                )
+            )
+            _console.print()
 
+    _divider()
+    _ok("All done!")
     _console.print(
-        "[bold green]Done.[/bold green] "
-        "Run [bold]navcode status[/bold] to verify."
+        f"\n  Run {_cmd('navcode status')} to verify your setup.\n"
     )
+
+
+@app.command()
+def watch() -> None:
+    """Start the background file watcher (if not already running)."""
+    from navcode.watcher import is_daemon_running, start_daemon
+
+    project_root = Path.cwd()
+    codenav_dir = project_root / ".navcode"
+
+    if not codenav_dir.exists():
+        _warn("navcode not initialized in this directory.")
+        _console.print(f"\n  Run: {_cmd('navcode init --auto')}\n")
+        raise typer.Exit(1)
+
+    if is_daemon_running(project_root):
+        _note("Watcher is already running.")
+        return
+
+    start_daemon(project_root)
+    _ok("File watcher started.")
+
+
+@app.command()
+def unwatch() -> None:
+    """Stop the background file watcher."""
+    from navcode.watcher import stop_daemon
+
+    project_root = Path.cwd()
+    codenav_dir = project_root / ".navcode"
+
+    if not codenav_dir.exists():
+        _warn("navcode not initialized in this directory.")
+        _console.print(f"\n  Run: {_cmd('navcode init --auto')}\n")
+        raise typer.Exit(1)
+
+    killed = stop_daemon(project_root)
+    if killed:
+        _ok("File watcher stopped.")
+    else:
+        _note("Watcher was not running.")
 
 
 @app.command()
 def status() -> None:
     """Show navcode index health and watcher status."""
     from navcode.indexer import CodebaseIndexer
-    from navcode.watcher import CodebaseWatcher
+    from navcode.watcher import is_daemon_running
     from rich.table import Table
 
     project_root = Path.cwd()
     codenav_dir = project_root / ".navcode"
 
     if not codenav_dir.exists():
-        _console.print("[red]✗ navcode not initialized.[/red]")
-        _console.print("Run: [bold]navcode init --auto[/bold]")
+        _warn("navcode not initialized in this directory.")
+        _console.print(f"\n  Run: {_cmd('navcode init --auto')}\n")
         raise typer.Exit(1)
 
-    db_path = codenav_dir / "index.db"
-    indexer = CodebaseIndexer(db_path)
+    indexer = CodebaseIndexer(project_root)
     s = indexer.get_stats()
+    db_size_kb = round((codenav_dir / "index.db").stat().st_size / 1024) if (codenav_dir / "index.db").exists() else 0
 
-    watcher = CodebaseWatcher(project_root, indexer)
-    running = watcher.is_running()
+    running = is_daemon_running(project_root)
 
-    table = Table(title="navcode status")
-    table.add_column("Property", style="cyan")
-    table.add_column("Value", style="green")
+    _divider("Project Status")
+    _console.print()
 
-    table.add_row("Initialized", "✓ yes")
-    table.add_row("Watcher", "✓ running" if running else "✗ stopped")
-    table.add_row("Indexed files", str(s.get("file_count", 0)))
-    table.add_row("Total symbols", str(s.get("symbol_count", 0)))
-    table.add_row("DB size", f"{s.get('db_size_kb', 0)} KB")
+    table = Table(
+        show_header=True,
+        header_style="bold cyan",
+        border_style="cyan",
+        show_lines=True,
+        expand=False,
+    )
+    table.add_column("Property", style="bold cyan", min_width=22)
+    table.add_column("Value", style="white", min_width=20)
+
+    table.add_row("Initialized", "[bold bright_cyan]✓  yes[/bold bright_cyan]")
+    table.add_row(
+        "Watcher",
+        "[bold bright_cyan]✓  running[/bold bright_cyan]" if running else "[bold red]✗  stopped[/bold red]",
+    )
+    table.add_row("Indexed files",  f"[bold white]{s.get('file_count', 0)}[/bold white]")
+    table.add_row("Total symbols",  f"[bold white]{s.get('symbol_count', 0)}[/bold white]")
+    table.add_row("DB size",        f"[bold white]{db_size_kb} KB[/bold white]")
     table.add_row(
         "Graph",
-        "✓ built" if (codenav_dir / "graph.json").exists() else "✗ not built",
+        "[bold bright_cyan]✓  built[/bold bright_cyan]"
+        if (codenav_dir / "graph.json").exists()
+        else "[bold red]✗  not built[/bold red]",
     )
     table.add_row(
         "Embeddings model",
-        "✓ ready"
+        "[bold bright_cyan]✓  ready[/bold bright_cyan]"
         if (Path.home() / ".navcode" / "models" / "model_quantized.onnx").exists()
-        else "✗ missing",
+        else "[bold red]✗  missing[/bold red]",
     )
 
     _console.print(table)
+    _console.print()
+    _divider()
+    _console.print()
 
 
 @app.command()
@@ -387,35 +580,43 @@ def reindex() -> None:
     codenav_dir = project_root / ".navcode"
 
     if not codenav_dir.exists():
-        _console.print("[red]✗ navcode not initialized.[/red]")
+        _warn("navcode not initialized.")
+        _console.print(f"\n  Run: {_cmd('navcode init --auto')}\n")
         raise typer.Exit(1)
 
-    _console.print("[bold]Reindexing codebase...[/bold]\n")
+    _divider("Reindexing Codebase")
+    _console.print()
 
-    db_path = codenav_dir / "index.db"
-    indexer = CodebaseIndexer(db_path)
+    indexer = CodebaseIndexer(project_root)
 
     try:
         engine = EmbeddingsEngine()
     except Exception:
         engine = None
-        _console.print("[yellow]⚠ Embeddings unavailable — FTS5 only[/yellow]")
+        _warn("Embeddings unavailable — FTS5 only")
 
     files = _collect_files(project_root)
-    _console.print(f"[dim]Found {len(files)} files to index[/dim]")
-    indexed, failed = _run_index(indexer, files, engine)
+    _info(f"Found {len(files)} files to index")
 
-    _console.print(
-        f"[green]✓[/green] Indexed [bold]{indexed}[/bold] files"
-        + (f" [yellow]({failed} failed)[/yellow]" if failed else "")
+    progress, task = _make_progress(len(files) + 1)
+    with progress:
+        progress.update(task, description="Indexing")
+        indexed, failed = _run_index(indexer, files, engine, progress, task)
+        progress.update(task, description="Building graph")
+        graph = CallGraph(codenav_dir / "index.db")
+        graph.save(codenav_dir / "graph.json")
+        progress.advance(task)
+
+    _ok(
+        f"Indexed [bold]{indexed}[/bold] files"
+        + (f"  [bold red]({failed} failed)[/bold red]" if failed else "")
     )
+    _ok("Graph rebuilt")
 
-    # Rebuild graph
-    _console.print("[dim]Rebuilding call graph...[/dim]")
-    graph = CallGraph(codenav_dir / "index.db")
-    graph.save(codenav_dir / "graph.json")
-    _console.print("[green]✓[/green] Graph rebuilt")
-    _console.print("[bold green]Reindex complete.[/bold green]")
+    _console.print()
+    _divider()
+    _ok("Reindex complete!")
+    _console.print()
 
 
 @app.command()
@@ -426,8 +627,11 @@ def logs(
     project_root = Path.cwd()
     log_path = project_root / ".navcode" / "navcode.log"
 
+    _divider(f"Last {tail} Log Lines")
+    _console.print()
+
     if not log_path.exists():
-        _console.print("[yellow]No logs found yet.[/yellow]")
+        _warn("No logs found yet.")
         raise typer.Exit()
 
     lines = log_path.read_text(encoding="utf-8").splitlines()
@@ -435,13 +639,17 @@ def logs(
 
     for line in recent:
         if "ERROR" in line:
-            _console.print(f"[red]{line}[/red]")
+            _console.print(f"[bold red]{line}[/bold red]")
         elif "WARNING" in line:
-            _console.print(f"[yellow]{line}[/yellow]")
+            _console.print(f"[bold yellow]{line}[/bold yellow]")
         elif "SUCCESS" in line or "✓" in line:
-            _console.print(f"[green]{line}[/green]")
+            _console.print(f"[bright_cyan]{line}[/bright_cyan]")
         else:
-            _console.print(line)
+            _console.print(f"[dim white]{line}[/dim white]")
+
+    _console.print()
+    _divider()
+    _console.print()
 
 
 @app.command()
@@ -454,12 +662,13 @@ def stats() -> None:
     codenav_dir = project_root / ".navcode"
 
     if not codenav_dir.exists():
-        _console.print("[red]✗ navcode not initialized.[/red]")
+        _warn("navcode not initialized.")
+        _console.print(f"\n  Run: {_cmd('navcode init --auto')}\n")
         raise typer.Exit(1)
 
-    db_path = codenav_dir / "index.db"
-    indexer = CodebaseIndexer(db_path)
+    indexer = CodebaseIndexer(project_root)
     s = indexer.get_stats()
+    db_size_kb = round((codenav_dir / "index.db").stat().st_size / 1024) if (codenav_dir / "index.db").exists() else 0
 
     # Token savings estimate
     file_count = s.get("file_count", 0)
@@ -470,20 +679,33 @@ def stats() -> None:
     saved = max(0, total_raw - avg_context_tokens)
     reduction = round((saved / total_raw * 100) if total_raw else 0, 1)
 
-    table = Table(title="navcode stats")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green")
+    _divider("Token Savings Report")
+    _console.print()
 
-    table.add_row("Indexed files", str(file_count))
-    table.add_row("Total symbols", str(symbol_count))
-    table.add_row("DB size", f"{s.get('db_size_kb', 0)} KB")
-    table.add_row("Est. raw tokens", f"~{total_raw:,}")
-    table.add_row("Est. context tokens", f"~{avg_context_tokens:,}")
-    table.add_row("Est. tokens saved", f"~{saved:,}")
-    table.add_row("Est. reduction", f"{reduction}%")
+    table = Table(
+        show_header=True,
+        header_style="bold cyan",
+        border_style="cyan",
+        show_lines=True,
+        expand=False,
+    )
+    table.add_column("Metric", style="bold cyan", min_width=24)
+    table.add_column("Value", style="white", min_width=16)
+
+    table.add_row("Indexed files",        f"[bold white]{file_count}[/bold white]")
+    table.add_row("Total symbols",        f"[bold white]{symbol_count}[/bold white]")
+    table.add_row("DB size",              f"[bold white]{db_size_kb} KB[/bold white]")
+    table.add_row("Est. raw tokens",      f"[bold red]~{total_raw:,}[/bold red]")
+    table.add_row("Est. context tokens",  f"[bold yellow]~{avg_context_tokens:,}[/bold yellow]")
+    table.add_row("Est. tokens saved",    f"[bold bright_cyan]~{saved:,}[/bold bright_cyan]")
+    table.add_row("Est. reduction",       f"[bold bright_cyan]{reduction}%[/bold bright_cyan]")
 
     _console.print(table)
-    _console.print("\n[dim]Estimates based on avg 2000 tokens/file[/dim]")
+    _console.print()
+    _info("Estimates based on avg 2 000 tokens/file")
+    _console.print()
+    _divider()
+    _console.print()
 
 
 @app.command()
@@ -497,17 +719,22 @@ def install(
     """
     from navcode._bootstrap import ensure_model, is_model_ready
 
-    _console.print("[bold cyan]navcode install[/bold cyan]\n")
+    _print_banner()
+    _divider("Fresh Install")
+    _console.print()
 
     # Step 1 — ensure model
     if not is_model_ready():
-        _console.print("[bold]Step 1/2[/bold] Downloading embedding model...")
+        _info("Step 1/2  Downloading embedding model...")
         ensure_model()
+        _ok("Embedding model downloaded")
     else:
-        _console.print("[green]✓[/green] Embedding model already present")
+        _ok("Embedding model already present")
 
     # Step 2 — delegate to init with --auto
-    _console.print("\n[bold]Step 2/2[/bold] Initialising project index...\n")
+    _console.print()
+    _info("Step 2/2  Initialising project index...")
+    _console.print()
     ctx = typer.get_current_context()
     ctx.invoke(init, auto=auto)
 
@@ -538,25 +765,27 @@ def uninstall(
         targets.append(("Model cache  ", navcode_home))
 
     if not targets:
-        _console.print("[yellow]Nothing to remove — navcode data not found.[/yellow]")
+        _warn("Nothing to remove — navcode data not found.")
         raise typer.Exit()
 
-    _console.print("[bold]The following will be deleted:[/bold]\n")
+    _divider("Uninstall")
+    _console.print()
+    _console.print("[bold red]  The following will be deleted:[/bold red]\n")
     for label, path in targets:
-        _console.print(f"  [red]✗[/red] {label}  [dim]{path}[/dim]")
+        _console.print(f"  [bold red]✗[/bold red]  [bold white]{label}[/bold white]  {_path(path)}")
 
     _console.print()
 
     if not yes:
         confirm = typer.confirm("Continue?", default=False)
         if not confirm:
-            _console.print("[dim]Aborted.[/dim]")
+            _info("Aborted.")
             raise typer.Exit()
 
     # --- delete ---
     for label, path in targets:
         shutil.rmtree(path, ignore_errors=True)
-        _console.print(f"[green]✓[/green] Removed {path}")
+        _ok(f"Removed {_path(path)}")
 
     # --- clean .gitignore ---
     gitignore = project_root / ".gitignore"
@@ -567,12 +796,14 @@ def uninstall(
         ).strip() + "\n"
         if cleaned != text:
             gitignore.write_text(cleaned, encoding="utf-8")
-            _console.print("[green]✓[/green] Removed .navcode/ from .gitignore")
+            _ok(f"Removed .navcode/ from {_path(gitignore)}")
 
+    _console.print()
+    _divider()
+    _ok("Done.")
     _console.print(
-        "\n[bold green]Done.[/bold green] "
-        "Run [bold]navcode install[/bold] to set up again, "
-        "or [bold]pip uninstall navcode[/bold] to remove the tool entirely."
+        f"\n  Reinstall anytime:  {_cmd('navcode install')}"
+        f"\n  Full removal:       {_cmd('pip uninstall navcode')}\n"
     )
 
 
@@ -583,7 +814,11 @@ def mcp_serve(
     """Start navcode MCP server for agent connections."""
     from navcode.mcp_server import serve
 
-    _console.print("[green]Starting navcode MCP server...[/green]")
+    _divider("MCP Server")
+    _console.print()
+    _ok(f"Starting navcode MCP server at {_path(root)}")
+    _info("Waiting for agent connections...")
+    _console.print()
     serve(project_root=root)
 
 
