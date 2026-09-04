@@ -1,6 +1,6 @@
 [project]
 name = "navcode"
-version = "0.1.0"
+version = "0.1.1"
 description = "Codebase intelligence layer for AI coding agents — 80-90% token reduction"
 authors = [{name = "Noman Rafique", email = "nomanrafique01@gmail.com"}]
 license = "MIT"
@@ -45,7 +45,6 @@ dependencies = [
     "tree-sitter-scala>=0.21.0",
     "tree-sitter-haskell>=0.21.0",
     "tree-sitter-lua>=0.1.0",
-    "tree-sitter-r>=0.1.0",
     "tree-sitter-bash>=0.21.0",
     "tree-sitter-html>=0.20.0",
     "tree-sitter-css>=0.21.0",
@@ -54,7 +53,6 @@ dependencies = [
     "tree-sitter-toml>=0.6.0",
     "tree-sitter-markdown>=0.3.0",
     "tree-sitter-sql>=0.2.0",
-    "tree-sitter-dockerfile>=0.2.0",
     "tree-sitter-regex>=0.21.0",
 ]
 
