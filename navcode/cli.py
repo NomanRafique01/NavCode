@@ -1,15 +1,24 @@
 """Typer CLI entry point for navcode."""
 
+import sys
+import io
 from pathlib import Path
 from typing import Optional
 
 import typer
+from loguru import logger
 from rich.console import Console
 from navcode import __version__
 
+# Force UTF-8 output on Windows so Rich unicode symbols don't crash cp1252
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if sys.stderr.encoding and sys.stderr.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 app = typer.Typer(
     name="navcode",
-    help="Codebase intelligence layer for AI coding agents — 80-90% token reduction.",
+    help="Codebase intelligence layer for AI coding agents - 80-90% token reduction.",
     add_completion=False,
 )
 
@@ -39,6 +48,19 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _setup_logging() -> None:
+    """Activate file logging into .codenav/navcode.log if the dir exists."""
+    log_dir = Path.cwd() / ".codenav"
+    if log_dir.exists():
+        logger.add(
+            log_dir / "navcode.log",
+            rotation="5 MB",
+            retention="7 days",
+            level="INFO",
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
+        )
+
+
 @app.callback()
 def main(
     version: Optional[bool] = typer.Option(
@@ -51,6 +73,9 @@ def main(
     ),
 ) -> None:
     """navcode — codebase intelligence layer for AI coding agents."""
+    from navcode._bootstrap import ensure_model
+    _setup_logging()
+    ensure_model()
 
 
 # ---------------------------------------------------------------------------
@@ -95,15 +120,13 @@ def init(
     # Index codebase
     _console.print("Indexing codebase...")
     indexer = CodebaseIndexer(codenav_dir / "index.db")
-    from navcode.parser import ASTParser
     from navcode.embeddings import EmbeddingsEngine
     try:
         engine = EmbeddingsEngine()
     except Exception:
         engine = None
-        _console.print("[yellow]⚠ Embeddings unavailable — using FTS5 only[/yellow]")
+        _console.print("[yellow]Embeddings unavailable - using FTS5 only[/yellow]")
 
-    parser = ASTParser()
     files = list(project_root.rglob("*"))
     indexed = 0
     for f in files:

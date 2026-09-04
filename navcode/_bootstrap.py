@@ -15,10 +15,14 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 
+# Quantized ONNX from xenova mirror (sentence-transformers original lacks model_quantized.onnx)
 _HF_BASE: str = (
     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
 )
-MODEL_URL: str = f"{_HF_BASE}/onnx/model_quantized.onnx"
+_XENOVA_BASE: str = (
+    "https://huggingface.co/xenova/all-MiniLM-L6-v2/resolve/main"
+)
+MODEL_URL: str = f"{_XENOVA_BASE}/onnx/model_quantized.onnx"
 MODEL_PATH: Path = Path.home() / ".navcode" / "models" / "model_quantized.onnx"
 
 # Tokenizer files required by EmbeddingsEngine
@@ -29,7 +33,7 @@ _TOKENIZER_FILES: list[str] = [
     "special_tokens_map.json",
 ]
 
-_console = Console()
+_console = Console(highlight=False)
 
 
 def _download_file(url: str, dest: Path, label: str) -> None:
@@ -69,9 +73,11 @@ def ensure_model() -> None:
     """
     if MODEL_PATH.exists():
         logger.debug("ONNX model already present at {}", MODEL_PATH)
+        _ensure_tokenizer_files()
+        return
     else:
         MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        logger.info("ONNX model not found — downloading from HuggingFace…")
+        logger.info("ONNX model not found - downloading from HuggingFace...")
 
         try:
             _download_file(MODEL_URL, MODEL_PATH, "Downloading model")
@@ -83,7 +89,7 @@ def ensure_model() -> None:
                     f"[dim]{exc}[/dim]\n\n"
                     "navcode will still load — the model will be downloaded on first "
                     "[cyan]navcode init[/cyan].",
-                    title="[bold yellow]⚠ Model download skipped[/bold yellow]",
+                    title="[bold yellow]Model download skipped[/bold yellow]",
                     border_style="yellow",
                 )
             )
@@ -115,7 +121,7 @@ def _ensure_tokenizer_files() -> None:
                     f"[yellow]navcode[/yellow] could not download [cyan]{filename}[/cyan].\n"
                     f"[dim]{exc}[/dim]\n\n"
                     "Semantic search may be unavailable until this file is present.",
-                    title="[bold yellow]⚠ Tokenizer file download skipped[/bold yellow]",
+                    title="[bold yellow]Tokenizer file download skipped[/bold yellow]",
                     border_style="yellow",
                 )
             )
