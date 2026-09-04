@@ -110,7 +110,7 @@ class ContextRetriever:
         db_path = self._root / ".navcode" / "index.db"
         graph_path = self._root / ".navcode" / "graph.json"
 
-        self.indexer = CodebaseIndexer(db_path)
+        self.indexer = CodebaseIndexer(self._root)
         self.classifier = TaskClassifier()
 
         # Embeddings — optional; warn and continue if unavailable
