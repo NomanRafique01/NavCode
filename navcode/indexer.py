@@ -453,9 +453,9 @@ class CodebaseIndexer:
                 embed_text = f"{symbol_name} {symbol_type} {content}"
                 try:
                     embedding = engine.embed(embed_text)
-                    self.store_embedding(symbol_rowid, embedding)
+                    self.store_embedding(symbol_rowid, embedding, _lock=db_lock)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("Embedding failed for {} ({}): {}", rel, symbol_name, exc)
+                    logger.debug("Embedding failed for {} ({}): {}", rel, symbol_name, exc)
 
         logger.trace("Indexed {} ({} chunks, lang={})", rel, len(chunks), language)
 
@@ -540,23 +540,37 @@ class CodebaseIndexer:
         ).fetchone()
         return row is not None
 
-    def store_embedding(self, symbol_rowid: int, embedding: np.ndarray) -> None:
+    def store_embedding(
+        self,
+        symbol_rowid: int,
+        embedding: np.ndarray,
+        _lock: "threading.Lock | None" = None,
+    ) -> None:
         """Persist *embedding* for a symbol identified by its rowid.
 
         Args:
             symbol_rowid: ``rowid`` of the corresponding symbols row.
             embedding: Float32 array of shape ``(384,)``.
+            _lock: Optional lock already held by the caller (e.g. from
+                ``index_files_parallel``).  When provided the write is done
+                inside that lock and no new transaction context is opened,
+                avoiding nested-transaction errors on the shared connection.
         """
         blob = embedding.astype(np.float32).tobytes()
-        with self._conn:
-            self._conn.execute(
-                """
-                INSERT INTO embeddings (symbol_rowid, embedding)
-                VALUES (?, ?)
-                ON CONFLICT(symbol_rowid) DO UPDATE SET embedding = excluded.embedding
-                """,
-                (symbol_rowid, blob),
-            )
+        sql = """
+            INSERT INTO embeddings (symbol_rowid, embedding)
+            VALUES (?, ?)
+            ON CONFLICT(symbol_rowid) DO UPDATE SET embedding = excluded.embedding
+        """
+        if _lock is not None:
+            # Caller already serialises DB access via this lock; execute
+            # directly so we don't start a second transaction on the same conn.
+            with _lock:
+                self._conn.execute(sql, (symbol_rowid, blob))
+                self._conn.commit()
+        else:
+            with self._conn:
+                self._conn.execute(sql, (symbol_rowid, blob))
 
     def get_all_embeddings(self) -> tuple[np.ndarray, list[int]]:
         """Load all stored embeddings into memory.
