@@ -93,8 +93,8 @@ def app_startup(
         ensure_model()
 
     # Step 2 — heal .codenav/ if deleted
-    # Skip for init — it creates .codenav/ itself
-    if ctx.invoked_subcommand == "init":
+    # Skip for commands that manage the dirs themselves
+    if ctx.invoked_subcommand in ("init", "install", "uninstall"):
         return
 
     project_root = Path.cwd()
@@ -495,6 +495,96 @@ def stats() -> None:
 
     _console.print(table)
     _console.print("\n[dim]Estimates based on avg 2000 tokens/file[/dim]")
+
+
+@app.command()
+def install(
+    auto: bool = typer.Option(True, "--auto/--no-auto", help="Auto-detect installed agents."),
+) -> None:
+    """Fresh-machine setup: download model then index this project.
+
+    Equivalent to running navcode init --auto on a clean install.
+    Run this once after pip install navcode.
+    """
+    from navcode._bootstrap import ensure_model, is_model_ready
+
+    _console.print("[bold cyan]navcode install[/bold cyan]\n")
+
+    # Step 1 — ensure model
+    if not is_model_ready():
+        _console.print("[bold]Step 1/2[/bold] Downloading embedding model...")
+        ensure_model()
+    else:
+        _console.print("[green]✓[/green] Embedding model already present")
+
+    # Step 2 — delegate to init with --auto
+    _console.print("\n[bold]Step 2/2[/bold] Initialising project index...\n")
+    ctx = typer.get_current_context()
+    ctx.invoke(init, auto=auto)
+
+
+@app.command()
+def uninstall(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+    keep_model: bool = typer.Option(
+        False, "--keep-model", help="Keep ~/.navcode/ model cache, only remove project index."
+    ),
+) -> None:
+    """Remove navcode data: project index (.codenav/) and optionally the model cache (~/.navcode/).
+
+    After uninstalling, running any navcode command will auto-restore everything.
+    To fully remove navcode from your system run: pip uninstall navcode
+    """
+    import shutil
+
+    project_root = Path.cwd()
+    codenav_dir = project_root / ".codenav"
+    navcode_home = Path.home() / ".navcode"
+
+    # --- summarise what will be deleted ---
+    targets: list[tuple[str, Path]] = []
+    if codenav_dir.exists():
+        targets.append(("Project index", codenav_dir))
+    if not keep_model and navcode_home.exists():
+        targets.append(("Model cache  ", navcode_home))
+
+    if not targets:
+        _console.print("[yellow]Nothing to remove — navcode data not found.[/yellow]")
+        raise typer.Exit()
+
+    _console.print("[bold]The following will be deleted:[/bold]\n")
+    for label, path in targets:
+        _console.print(f"  [red]✗[/red] {label}  [dim]{path}[/dim]")
+
+    _console.print()
+
+    if not yes:
+        confirm = typer.confirm("Continue?", default=False)
+        if not confirm:
+            _console.print("[dim]Aborted.[/dim]")
+            raise typer.Exit()
+
+    # --- delete ---
+    for label, path in targets:
+        shutil.rmtree(path, ignore_errors=True)
+        _console.print(f"[green]✓[/green] Removed {path}")
+
+    # --- clean .gitignore ---
+    gitignore = project_root / ".gitignore"
+    if gitignore.exists() and codenav_dir in [p for _, p in targets]:
+        text = gitignore.read_text(encoding="utf-8")
+        cleaned = "\n".join(
+            line for line in text.splitlines() if line.strip() != ".codenav/"
+        ).strip() + "\n"
+        if cleaned != text:
+            gitignore.write_text(cleaned, encoding="utf-8")
+            _console.print("[green]✓[/green] Removed .codenav/ from .gitignore")
+
+    _console.print(
+        "\n[bold green]Done.[/bold green] "
+        "Run [bold]navcode install[/bold] to set up again, "
+        "or [bold]pip uninstall navcode[/bold] to remove the tool entirely."
+    )
 
 
 @app.command()
